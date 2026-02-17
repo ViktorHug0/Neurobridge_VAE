@@ -22,6 +22,13 @@ from module.eeg_encoder.model import EEGNet, EEGProject, TSConv, EEGTransformer
 from module.loss import ContrastiveLoss
 from module.util import retrieve_all
 from module.projector import *
+from module.logging import (
+    init_component_sums,
+    accumulate_components,
+    average_components,
+    format_loss_breakdown,
+    write_component_scalars,
+)
 from module.eeg_augmentation import RandomTimeShift, RandomGaussianNoise, RandomChannelDropout, RandomSmooth
 from iVAE.iVAE_utils import EEGiVAE, ivae_loss, WarmupMultiStepLR
 
@@ -343,6 +350,8 @@ if __name__ == '__main__':
         if ivae_model is not None:
             ivae_model.train()
         total_loss = 0.0
+        train_comp_sums = init_component_sums()
+        train_comp_count = 0
         for batch in tqdm(dataloader, desc=f"Epoch {epoch}/{args.num_epochs} [Train]"):
             eeg_batch = batch[0].to(device)
             subject_id_batch = batch[3].to(device).long()
@@ -407,6 +416,7 @@ if __name__ == '__main__':
                     loss = criterion(eeg_feature_batch, image_feature_batch, text_feature_batch, group_ids=group_ids)
                 else:
                     loss = criterion(eeg_feature_batch, image_feature_batch, text_feature_batch)
+                loss_components = {'total': loss.detach()}
 
             loss.backward()
             optimizer.step()
@@ -414,14 +424,15 @@ if __name__ == '__main__':
                 scheduler.step()
 
             total_loss += loss.item()
+            accumulate_components(train_comp_sums, loss_components)
+            train_comp_count += 1
 
         avg_loss = total_loss / len(dataloader)
         writer.add_scalar('Loss/train', avg_loss, epoch)
-        # Log iVAE sub-losses for the last batch of the epoch
-        if args.ivae and ivae_model is not None:
-            for k, v in loss_components.items():
-                writer.add_scalar(f'iVAE/{k}', v.item() if torch.is_tensor(v) else v, epoch)
+        avg_train_comp = average_components(train_comp_sums, train_comp_count)
+        write_component_scalars(writer, 'train', avg_train_comp, epoch)
         log(f"Epoch [{epoch}/{args.num_epochs}] Train Loss: {avg_loss:.4f}")
+        log(format_loss_breakdown("[Train]", avg_train_comp, args.ivae and ivae_model is not None))
         if args.save_weights:
             ckpt = {
                 'epoch': epoch,
@@ -444,6 +455,8 @@ if __name__ == '__main__':
         total_test_loss = 0.0
         eeg_feature_list = []
         image_feature_list = []
+        test_comp_sums = init_component_sums()
+        test_comp_count = 0
 
         with torch.no_grad():
             for batch in test_dataloader:
@@ -488,7 +501,7 @@ if __name__ == '__main__':
                     else:
                         recon_target = eeg_feature_batch
 
-                    loss, _ = ivae_loss(
+                    loss, test_loss_components = ivae_loss(
                         ivae_out, recon_target, ivae_betas,
                         gamma_cl=args.gamma_cl,
                         contrastive_loss_val=cl_loss,
@@ -508,14 +521,19 @@ if __name__ == '__main__':
                         loss = criterion(eeg_feature_batch, image_feature_batch, text_feature_batch, group_ids=group_ids)
                     else:
                         loss = criterion(eeg_feature_batch, image_feature_batch, text_feature_batch)
+                    test_loss_components = {'total': loss.detach()}
 
                     eeg_feature_list.append(eeg_feature_batch.cpu().numpy())
                     image_feature_list.append(image_feature_batch.cpu().numpy())
 
                 total_test_loss += loss.item()
+                accumulate_components(test_comp_sums, test_loss_components)
+                test_comp_count += 1
 
         avg_test_loss = total_test_loss / len(test_dataloader)
         writer.add_scalar('Loss/test', avg_test_loss, epoch)
+        avg_test_comp = average_components(test_comp_sums, test_comp_count)
+        write_component_scalars(writer, 'test', avg_test_comp, epoch)
 
         # Concatenate all EEG and image features for retrieval
         eeg_feature_all = np.concatenate(eeg_feature_list, axis=0)
@@ -524,6 +542,7 @@ if __name__ == '__main__':
         top5_acc = top5_count / total * 100
         top1_acc = top1_count / total * 100
         log(f"top5 acc {top5_acc:.2f}%\ttop1 acc {top1_acc:.2f}%\tTest Loss: {avg_test_loss:.4f}")
+        log(format_loss_breakdown("[Test]", avg_test_comp, args.ivae and ivae_model is not None))
 
         # Save the best model
         is_better = False

@@ -25,7 +25,7 @@ RUN_DIR="${OUTPUT_DIR}/${RUN_ID}"
 mkdir -p "$RUN_DIR"
 echo "$RUN_DIR" > "${OUTPUT_DIR}/last_run.txt"
 
-for SUB_ID in {1..10}
+for SUB_ID in {1..2}
 do
     OUTPUT_NAME=$(printf "sub-%02d" $SUB_ID)
     echo "Training subject ${SUB_ID}..."
@@ -59,8 +59,24 @@ do
         --feature_dim "$FEATURE_DIM" \
         --data_average \
         --save_weights \
-        --multi_positive_loss \
-        --seed 19992765;
+        --ivae \
+        --z_s_dim 16 \
+        --z_i_dim 256 \
+        --z_is_dim 32 \
+        --z_n_dim 8 \
+        --beta_s 1.0 \
+        --beta_i 1.0 \
+        --beta_is 1.0 \
+        --beta_n 1.0 \
+        --gamma_cl 1.0 \
+        --C_max 25.0 \
+        --C_stop_iter 10000 \
+        --ivae_hidden_dim 512 \
+        --subj_emb_dim 32 \
+        --ivae_n_layers 1 \
+        --n_subjects 11 \
+        --retrieval_feature "z_i" \
+        --seed 2025;
 done
 
 python compute_avg_results.py --result_dir "$RUN_DIR";
@@ -90,6 +106,7 @@ python compute_avg_results.py --result_dir "$RUN_DIR";
         # --n_subjects 10
         # --retrieval_feature "z_i"      # or "full_z"
         # --reconstruct_raw_eeg          # decode to raw EEG instead of backbone embedding
+        # --multi_positive_loss
 
         # ── Scheduler flags (uncomment to enable) ──
         # --scheduler
