@@ -70,31 +70,3 @@ python compute_avg_results.py --result_dir "$RUN_DIR";
         # --eeg_aug
         # --eeg_aug_type "smooth"
         # --image_test_aug
-
-        # ── iVAE flags (uncomment to enable) ──
-        # --ivae
-        # --z_s_dim 32
-        # --z_i_dim 128
-        # --z_is_dim 64
-        # --z_n_dim 32
-        # --beta_s 1.0
-        # --beta_i 1.0
-        # --beta_is 1.0
-        # --beta_n 1.0
-        # --gamma_cl 1.0
-        # --C_max 25.0
-        # --C_stop_iter 10000
-        # --ivae_hidden_dim 512
-        # --subj_emb_dim 64
-        # --ivae_n_layers 1
-        # --n_subjects 11
-        # --retrieval_feature "z_i"      # or "full_z"
-        # --reconstruct_raw_eeg          # decode to raw EEG instead of backbone embedding
-
-        # ── Scheduler flags (uncomment to enable) ──
-        # --scheduler
-        # --milestones 20 35
-        # --scheduler_gamma 0.1
-        # --warmup_steps 500
-        # --warmup_factor 0.333
-        # --warmup_method "linear"
