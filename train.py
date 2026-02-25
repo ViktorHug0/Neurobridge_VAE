@@ -30,7 +30,126 @@ from module.logging import (
     write_component_scalars,
 )
 from module.eeg_augmentation import RandomTimeShift, RandomGaussianNoise, RandomChannelDropout, RandomSmooth
-from iVAE.iVAE_utils import EEGiVAE, ivae_loss, WarmupMultiStepLR
+from iVAE.iVAE_utils import (
+    EEGSubjectCondVAE, SubjectClassifier, grad_reverse,
+    scvae_loss, WarmupMultiStepLR,
+)
+from module.subject_signature import get_subject_signatures
+
+
+def append_loss_history(history: dict[str, list[float]], comp: dict[str, float]) -> None:
+    """Append scalar component values to per-key history lists."""
+    for k, v in comp.items():
+        history.setdefault(k, []).append(float(v))
+
+
+def save_loss_component_plots(
+    train_history: dict[str, list[float]],
+    test_history: dict[str, list[float]],
+    epochs: list[int],
+    out_dir: str,
+) -> dict[str, str]:
+    """Save raw/scaled loss evolution plots (linear + log-y) and top1 curve."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    raw_keys = [
+        "total", "recon", "kl_s", "kl_i", "C", "contrastive", "subj_ce_zs", "subj_ce_zi_adv",
+    ]
+    scaled_keys = [
+        "total", "recon_weighted", "kl_s_weighted", "kl_i_weighted",
+        "contrastive_weighted", "subj_ce_zs_weighted", "subj_ce_zi_adv_weighted",
+    ]
+
+    def _plot(keys: list[str], title: str, filename: str, use_log_y: bool = False) -> str:
+        fig, ax = plt.subplots(figsize=(11, 6), constrained_layout=True)
+        any_line = False
+        plotted_keys: list[str] = []
+        # Assign one unique color per loss key (shared between train/test variants).
+        # tab20 avoids early repeats for our current key count.
+        cmap = matplotlib.colormaps.get_cmap("tab20")
+        key_to_color = {k: cmap(i / max(len(keys), 1)) for i, k in enumerate(keys)}
+
+        for k in keys:
+            tr = train_history.get(k)
+            te = test_history.get(k)
+            if tr is not None and len(tr) > 0:
+                n = min(len(epochs), len(tr))
+                tr_y = np.asarray(tr[:n], dtype=float)
+                if use_log_y:
+                    tr_y = np.maximum(tr_y, 1e-8)
+                ax.plot(epochs[:n], tr_y, color=key_to_color[k], linestyle="-", label=f"train/{k}")
+                any_line = True
+                if k not in plotted_keys:
+                    plotted_keys.append(k)
+            if te is not None and len(te) > 0:
+                n = min(len(epochs), len(te))
+                te_y = np.asarray(te[:n], dtype=float)
+                if use_log_y:
+                    te_y = np.maximum(te_y, 1e-8)
+                ax.plot(epochs[:n], te_y, color=key_to_color[k], linestyle="--", label=f"test/{k}")
+                any_line = True
+                if k not in plotted_keys:
+                    plotted_keys.append(k)
+        top1 = test_history.get("top1_acc")
+        if top1 is not None and len(top1) > 0:
+            n = min(len(epochs), len(top1))
+            ax2 = ax.twinx()
+            ax2.plot(epochs[:n], top1[:n], color="black", linewidth=2.0, linestyle="-.", label="test/top1_acc(%)")
+            ax2.set_ylabel("top1 acc (%)")
+            ax2.set_ylim(0.0, 100.0)
+            h2, l2 = ax2.get_legend_handles_labels()
+        else:
+            ax2 = None
+            h2, l2 = [], []
+        ax.set_title(title)
+        ax.set_xlabel("epoch")
+        ax.set_ylabel("loss")
+        if use_log_y:
+            ax.set_yscale("log")
+        ax.grid(True, alpha=0.3)
+        if any_line:
+            # Build legend as rows of [train/key, test/key] so column 1 is all train
+            # and column 2 is all test.
+            handles, labels = ax.get_legend_handles_labels()
+            handle_map = {lab: h for h, lab in zip(handles, labels)}
+            ordered_handles = []
+            ordered_labels = []
+            for k in plotted_keys:
+                tr_lab = f"train/{k}"
+                te_lab = f"test/{k}"
+                if tr_lab in handle_map:
+                    ordered_handles.append(handle_map[tr_lab])
+                    ordered_labels.append(tr_lab)
+                else:
+                    ordered_handles.append(plt.Line2D([], [], color=key_to_color[k], linestyle="-", alpha=0.0))
+                    ordered_labels.append("")
+                if te_lab in handle_map:
+                    ordered_handles.append(handle_map[te_lab])
+                    ordered_labels.append(te_lab)
+                else:
+                    ordered_handles.append(plt.Line2D([], [], color=key_to_color[k], linestyle="--", alpha=0.0))
+                    ordered_labels.append("")
+            combined_handles = ordered_handles + h2
+            combined_labels = ordered_labels + l2
+            ax.legend(combined_handles, combined_labels, fontsize=8, loc="best", ncol=2)
+        else:
+            ax.text(0.5, 0.5, "No matching loss keys found", ha="center", va="center")
+        out_path = os.path.join(out_dir, filename)
+        fig.savefig(out_path, dpi=200)
+        plt.close(fig)
+        return out_path
+
+    os.makedirs(out_dir, exist_ok=True)
+    return {
+        "raw": _plot(raw_keys, "Loss evolution (raw components)", "loss_components_raw.png"),
+        "scaled": _plot(scaled_keys, "Loss evolution (scaled components)", "loss_components_scaled.png"),
+        "weighted": _plot(scaled_keys, "Loss evolution (scaled components)", "loss_components_weighted.png"),
+        "raw_log": _plot(raw_keys, "Loss evolution (raw components, log-y)", "loss_components_raw_log.png", use_log_y=True),
+        "scaled_log": _plot(scaled_keys, "Loss evolution (scaled components, log-y)", "loss_components_scaled_log.png", use_log_y=True),
+    }
 
 # Set the random seed. If not provided, generate a new one based on the current time.
 def seed_everything(seed: int = None):
@@ -100,21 +219,30 @@ if __name__ == '__main__':
     parser.add_argument('--ivae', action='store_true', help='enable iVAE bottleneck between EEG encoder and contrastive loss')
     parser.add_argument('--z_s_dim', type=int, default=32, help='subject latent block dimension')
     parser.add_argument('--z_i_dim', type=int, default=128, help='image latent block dimension')
-    parser.add_argument('--z_is_dim', type=int, default=64, help='subject-image interaction latent block dimension')
-    parser.add_argument('--z_n_dim', type=int, default=32, help='noise latent block dimension')
     parser.add_argument('--beta_s', type=float, default=1.0, help='beta weight for subject KL')
     parser.add_argument('--beta_i', type=float, default=1.0, help='beta weight for image KL')
-    parser.add_argument('--beta_is', type=float, default=1.0, help='beta weight for interaction KL')
-    parser.add_argument('--beta_n', type=float, default=1.0, help='beta weight for noise KL')
-    parser.add_argument('--gamma_cl', type=float, default=1.0, help='contrastive loss weight in iVAE total loss')
+    parser.add_argument('--lambda_recon', type=float, default=1.0, help='weight applied to reconstruction loss term')
+    parser.add_argument('--gamma_cl', type=float, default=1.0, help='contrastive loss weight in subject-conditioned VAE total loss')
+    parser.add_argument('--lambda_subj_zs', type=float, default=1.0, help='weight of subject CE head on z_s')
+    parser.add_argument('--lambda_subj_zi_adv', type=float, default=1.0, help='weight of adversarial subject CE head on z_i')
+    parser.add_argument('--grl_lambda', type=float, default=1.0, help='gradient reversal strength for z_i subject adversary')
     parser.add_argument('--C_max', type=float, default=25.0, help='maximum KL capacity for beta-VAE ramping')
     parser.add_argument('--C_stop_iter', type=int, default=10000, help='number of global steps to ramp capacity from 0 to C_max')
-    parser.add_argument('--ivae_hidden_dim', type=int, default=512, help='hidden layer width for iVAE MLPs')
-    parser.add_argument('--subj_emb_dim', type=int, default=64, help='shared subject embedding dimension')
+    parser.add_argument('--ivae_hidden_dim', type=int, default=512, help='hidden layer width for subject-conditioned VAE MLPs')
     parser.add_argument('--ivae_n_layers', type=int, default=1, help='number of extra hidden layers in iVAE MLPs')
     parser.add_argument('--n_subjects', type=int, default=11, help='embedding table size (must be > max subject ID)')
-    parser.add_argument('--reconstruct_raw_eeg', action='store_true', help='decode to raw EEG space instead of backbone embedding')
     parser.add_argument('--retrieval_feature', type=str, choices=['z_i', 'full_z'], default='z_i', help='which latent(s) to use for retrieval at eval time')
+    # Enabled by default for inter-subject iVAE; use --no-* flags to disable explicitly.
+    parser.add_argument('--posterior_cond_on_subject', dest='posterior_cond_on_subject', action='store_true', help='condition z_s posterior on subject signature u: q(z_s|x,u)')
+    parser.add_argument('--no_posterior_cond_on_subject', dest='posterior_cond_on_subject', action='store_false', help='disable conditioning z_s posterior on subject signature u')
+    parser.add_argument('--image_prior_cond_on_image', dest='image_prior_cond_on_image', action='store_true', help='condition z_i prior on image embedding: p(z_i|img_feat)')
+    parser.add_argument('--no_image_prior_cond_on_image', dest='image_prior_cond_on_image', action='store_false', help='disable conditioning z_i prior on image embedding')
+    parser.set_defaults(
+        posterior_cond_on_subject=True,
+        image_prior_cond_on_image=True,
+    )
+    parser.add_argument('--image_prior_hidden_dim', type=int, default=128, help='hidden width for image prior MLP')
+    parser.add_argument('--image_prior_n_layers', type=int, default=1, help='number of extra hidden layers in image prior MLP')
 
     # ── Scheduler arguments ──
     parser.add_argument('--scheduler', action='store_true', help='enable WarmupMultiStepLR scheduler')
@@ -248,27 +376,34 @@ if __name__ == '__main__':
     
     log(str(model))
 
-    # ── iVAE bottleneck (optional) ──
+    # ── Subject-conditioned VAE bottleneck (optional via --ivae) ──
     ivae_model = None
+    subj_cls_zs = None
+    subj_cls_zi_adv = None
     if args.ivae:
-        raw_eeg_dim = channels_num * eeg_sample_points if args.reconstruct_raw_eeg else None
-        ivae_model = EEGiVAE(
+        ivae_model = EEGSubjectCondVAE(
             feature_dim=feature_dim,
-            image_feature_dim=feature_dim,  # image features share the same dim
-            n_subjects=args.n_subjects,
-            z_s_dim=args.z_s_dim,
             z_i_dim=args.z_i_dim,
-            z_is_dim=args.z_is_dim,
-            z_n_dim=args.z_n_dim,
+            z_s_dim=args.z_s_dim,
+            u_dim=5,
             hidden_dim=args.ivae_hidden_dim,
-            subj_emb_dim=args.subj_emb_dim,
             n_layers=args.ivae_n_layers,
-            reconstruct_raw_eeg=args.reconstruct_raw_eeg,
-            raw_eeg_dim=raw_eeg_dim,
+            posterior_cond_on_subject=args.posterior_cond_on_subject,
+            image_prior_cond_on_image=args.image_prior_cond_on_image,
+            img_dim=feature_dim,
+            image_prior_hidden_dim=args.image_prior_hidden_dim,
+            image_prior_n_layers=args.image_prior_n_layers,
         ).to(device)
+        num_subject_classes = args.n_subjects - 1  # subject IDs are 1..10 in Things-EEG runs
+        subj_cls_zs = SubjectClassifier(args.z_s_dim, num_subject_classes).to(device)
+        subj_cls_zi_adv = SubjectClassifier(args.z_i_dim, num_subject_classes).to(device)
 
         ivae_params = sum(p.numel() for p in ivae_model.parameters() if p.requires_grad)
-        log(f'iVAE trainable parameters: {ivae_params / 1e6:.2f}M')
+        zs_head_params = sum(p.numel() for p in subj_cls_zs.parameters() if p.requires_grad)
+        zi_head_params = sum(p.numel() for p in subj_cls_zi_adv.parameters() if p.requires_grad)
+        log(f'Subject-conditioned VAE trainable parameters: {ivae_params / 1e6:.2f}M')
+        log(f'Subject head(z_s) trainable parameters: {zs_head_params / 1e6:.2f}M')
+        log(f'Subject adversary(z_i) trainable parameters: {zi_head_params / 1e6:.2f}M')
         log(str(ivae_model))
 
     # Determine eeg projector input dim (depends on iVAE mode)
@@ -276,7 +411,7 @@ if __name__ == '__main__':
         if args.retrieval_feature == 'z_i':
             eeg_proj_input_dim = args.z_i_dim
         else:  # full_z
-            eeg_proj_input_dim = args.z_s_dim + args.z_i_dim + args.z_is_dim + args.z_n_dim
+            eeg_proj_input_dim = args.z_s_dim + args.z_i_dim
     else:
         eeg_proj_input_dim = feature_dim
 
@@ -309,6 +444,8 @@ if __name__ == '__main__':
     trainable_parameters = list(model.parameters()) + list(eeg_projector.parameters()) + list(img_projector.parameters()) + list(text_projector.parameters())
     if args.ivae and ivae_model is not None:
         trainable_parameters.extend(list(ivae_model.parameters()))
+        trainable_parameters.extend(list(subj_cls_zs.parameters()))
+        trainable_parameters.extend(list(subj_cls_zi_adv.parameters()))
     if args.t_learnable:  # Only add criterion parameters if temperature is learnable
         trainable_parameters.extend([p for p in criterion.parameters() if p.requires_grad])
     
@@ -335,23 +472,28 @@ if __name__ == '__main__':
     text_projector.train()
     if ivae_model is not None:
         ivae_model.train()
+        subj_cls_zs.train()
+        subj_cls_zi_adv.train()
     best_top1_acc = 0.0
     best_top5_acc = 0.0
     best_test_loss = float('inf')
+    best_test_cl = float('inf')
     best_test_epoch = 0
-    global_step = 0  # global batch counter for iVAE capacity ramp
-
-    # iVAE beta dict (reused every batch)
-    ivae_betas = {'s': args.beta_s, 'i': args.beta_i,
-                  'is': args.beta_is, 'n': args.beta_n} if args.ivae else {}
+    global_step = 0
+    loss_epochs: list[int] = []
+    train_loss_history: dict[str, list[float]] = {}
+    test_loss_history: dict[str, list[float]] = {}
 
     for epoch in range(1, args.num_epochs + 1):
         model.train()
         if ivae_model is not None:
             ivae_model.train()
+            subj_cls_zs.train()
+            subj_cls_zi_adv.train()
         total_loss = 0.0
         train_comp_sums = init_component_sums()
         train_comp_count = 0
+
         for batch in tqdm(dataloader, desc=f"Epoch {epoch}/{args.num_epochs} [Train]"):
             eeg_batch = batch[0].to(device)
             subject_id_batch = batch[3].to(device).long()
@@ -368,8 +510,11 @@ if __name__ == '__main__':
 
             # ── iVAE path ──
             if args.ivae and ivae_model is not None:
+                u_batch = get_subject_signatures(subject_id_batch, device, dtype=eeg_feature_batch.dtype)
                 ivae_out = ivae_model(
-                    eeg_feature_batch, subject_id_batch, image_feature_batch,
+                    eeg_feature_batch,
+                    u_batch,
+                    img_feat=image_feature_batch if args.image_prior_cond_on_image else None,
                     global_step=global_step,
                     C_max=args.C_max,
                     C_stop_iter=args.C_stop_iter,
@@ -392,16 +537,25 @@ if __name__ == '__main__':
                 else:
                     cl_loss = criterion(eeg_proj, img_proj, text_proj)
 
-                # Reconstruction target
-                if args.reconstruct_raw_eeg:
-                    recon_target = eeg_batch.view(eeg_batch.size(0), -1)
-                else:
-                    recon_target = eeg_feature_batch.detach()
+                # Subject labels are expected in [0, n_classes-1]
+                subj_labels = (subject_id_batch - 1).clamp(min=0, max=args.n_subjects - 2)
+                subj_logits_zs = subj_cls_zs(ivae_out['z_s'])
+                subj_logits_zi_adv = subj_cls_zi_adv(
+                    grad_reverse(ivae_out['z_i'], lambda_grl=args.grl_lambda)
+                )
 
-                loss, loss_components = ivae_loss(
-                    ivae_out, recon_target, ivae_betas,
-                    gamma_cl=args.gamma_cl,
+                loss, loss_components = scvae_loss(
+                    ivae_out, eeg_feature_batch.detach(),
+                    beta_s=args.beta_s,
+                    beta_i=args.beta_i,
+                    lambda_recon=args.lambda_recon,
+                    lambda_cl=args.gamma_cl,
                     contrastive_loss_val=cl_loss,
+                    subj_logits_zs=subj_logits_zs,
+                    subj_logits_zi_adv=subj_logits_zi_adv,
+                    subj_labels=subj_labels,
+                    lambda_subj_zs=args.lambda_subj_zs,
+                    lambda_subj_zi_adv=args.lambda_subj_zi_adv,
                 )
                 global_step += 1
 
@@ -431,8 +585,10 @@ if __name__ == '__main__':
         writer.add_scalar('Loss/train', avg_loss, epoch)
         avg_train_comp = average_components(train_comp_sums, train_comp_count)
         write_component_scalars(writer, 'train', avg_train_comp, epoch)
+        append_loss_history(train_loss_history, avg_train_comp)
         log(f"Epoch [{epoch}/{args.num_epochs}] Train Loss: {avg_loss:.4f}")
         log(format_loss_breakdown("[Train]", avg_train_comp, args.ivae and ivae_model is not None))
+
         if args.save_weights:
             ckpt = {
                 'epoch': epoch,
@@ -444,6 +600,8 @@ if __name__ == '__main__':
             }
             if ivae_model is not None:
                 ckpt['ivae_model_state_dict'] = ivae_model.state_dict()
+                ckpt['subj_cls_zs_state_dict'] = subj_cls_zs.state_dict()
+                ckpt['subj_cls_zi_adv_state_dict'] = subj_cls_zi_adv.state_dict()
             torch.save(ckpt, f"{writer.log_dir}/checkpoint_last.pth")
 
         model.eval()
@@ -452,6 +610,8 @@ if __name__ == '__main__':
         text_projector.eval()
         if ivae_model is not None:
             ivae_model.eval()
+            subj_cls_zs.eval()
+            subj_cls_zi_adv.eval()
         total_test_loss = 0.0
         eeg_feature_list = []
         image_feature_list = []
@@ -474,8 +634,11 @@ if __name__ == '__main__':
 
                 # ── iVAE eval path ──
                 if args.ivae and ivae_model is not None:
+                    u_batch = get_subject_signatures(subject_id_batch, device, dtype=eeg_feature_batch.dtype)
                     ivae_out = ivae_model(
-                        eeg_feature_batch, subject_id_batch, image_feature_batch,
+                        eeg_feature_batch,
+                        u_batch,
+                        img_feat=image_feature_batch if args.image_prior_cond_on_image else None,
                         global_step=global_step,
                         C_max=args.C_max,
                         C_stop_iter=args.C_stop_iter,
@@ -496,15 +659,24 @@ if __name__ == '__main__':
                     else:
                         cl_loss = criterion(eeg_proj, img_proj, text_proj)
 
-                    if args.reconstruct_raw_eeg:
-                        recon_target = eeg_batch.view(eeg_batch.size(0), -1)
-                    else:
-                        recon_target = eeg_feature_batch
+                    subj_labels = (subject_id_batch - 1).clamp(min=0, max=args.n_subjects - 2)
+                    subj_logits_zs = subj_cls_zs(ivae_out['z_s'])
+                    subj_logits_zi_adv = subj_cls_zi_adv(
+                        grad_reverse(ivae_out['z_i'], lambda_grl=args.grl_lambda)
+                    )
 
-                    loss, test_loss_components = ivae_loss(
-                        ivae_out, recon_target, ivae_betas,
-                        gamma_cl=args.gamma_cl,
+                    loss, test_loss_components = scvae_loss(
+                        ivae_out, eeg_feature_batch,
+                        beta_s=args.beta_s,
+                        beta_i=args.beta_i,
+                        lambda_recon=args.lambda_recon,
+                        lambda_cl=args.gamma_cl,
                         contrastive_loss_val=cl_loss,
+                        subj_logits_zs=subj_logits_zs,
+                        subj_logits_zi_adv=subj_logits_zi_adv,
+                        subj_labels=subj_labels,
+                        lambda_subj_zs=args.lambda_subj_zs,
+                        lambda_subj_zi_adv=args.lambda_subj_zi_adv,
                     )
 
                     eeg_feature_list.append(eeg_proj.cpu().numpy())
@@ -534,6 +706,8 @@ if __name__ == '__main__':
         writer.add_scalar('Loss/test', avg_test_loss, epoch)
         avg_test_comp = average_components(test_comp_sums, test_comp_count)
         write_component_scalars(writer, 'test', avg_test_comp, epoch)
+        append_loss_history(test_loss_history, avg_test_comp)
+        loss_epochs.append(epoch)
 
         # Concatenate all EEG and image features for retrieval
         eeg_feature_all = np.concatenate(eeg_feature_list, axis=0)
@@ -541,18 +715,22 @@ if __name__ == '__main__':
         top5_count, top1_count, total = retrieve_all(eeg_feature_all, image_feature_all, args.data_average)
         top5_acc = top5_count / total * 100
         top1_acc = top1_count / total * 100
+        # Track retrieval quality alongside loss components for plotting.
+        test_loss_history.setdefault("top1_acc", []).append(float(top1_acc))
         log(f"top5 acc {top5_acc:.2f}%\ttop1 acc {top1_acc:.2f}%\tTest Loss: {avg_test_loss:.4f}")
         log(format_loss_breakdown("[Test]", avg_test_comp, args.ivae and ivae_model is not None))
 
         # Save the best model
+        curr_test_cl = avg_test_comp.get('contrastive', avg_test_loss)
         is_better = False
-        if avg_test_loss < best_test_loss:
+        if curr_test_cl < best_test_cl:
             is_better = True
-        elif avg_test_loss == best_test_loss and top1_acc > best_top1_acc:
-            # Use top1 accuracy as a secondary criterion when the loss is the same
+        elif curr_test_cl == best_test_cl and top1_acc > best_top1_acc:
+            # Use top1 accuracy as a secondary criterion when contrastive loss is the same.
             is_better = True
 
         if is_better:
+            best_test_cl = curr_test_cl
             best_test_loss = avg_test_loss
             best_top5_acc = top5_acc
             best_top1_acc = top1_acc
@@ -568,16 +746,38 @@ if __name__ == '__main__':
                 }
                 if ivae_model is not None:
                     best_ckpt['ivae_model_state_dict'] = ivae_model.state_dict()
+                    best_ckpt['subj_cls_zs_state_dict'] = subj_cls_zs.state_dict()
+                    best_ckpt['subj_cls_zi_adv_state_dict'] = subj_cls_zi_adv.state_dict()
                 torch.save(best_ckpt, f"{writer.log_dir}/checkpoint_test_best.pth")
-    
+
+    try:
+        loss_plot_paths = save_loss_component_plots(
+            train_history=train_loss_history,
+            test_history=test_loss_history,
+            epochs=loss_epochs,
+            out_dir=writer.log_dir,
+        )
+        log(f"Saved loss plot (raw): {loss_plot_paths.get('raw', '')}")
+        log(f"Saved loss plot (scaled): {loss_plot_paths.get('scaled', '')}")
+        log(f"Saved loss plot (raw, log-y): {loss_plot_paths.get('raw_log', '')}")
+        log(f"Saved loss plot (scaled, log-y): {loss_plot_paths.get('scaled_log', '')}")
+    except Exception as e:
+        log(f"[WARN] Failed to save loss component plots: {e}")
+
     result_dict = {}
     result_dict['top1 acc'] = f'{top1_acc:.2f}'
     result_dict['top5 acc'] = f'{top5_acc:.2f}'
     result_dict['best top1 acc'] = f'{best_top1_acc:.2f}'
     result_dict['best top5 acc'] = f'{best_top5_acc:.2f}'
+    result_dict['best test contrastive loss'] = f'{best_test_cl:.4f}'
     result_dict['best test loss'] = f'{best_test_loss:.4f}'
     result_dict['best epoch'] = best_test_epoch
     df = pd.DataFrame(result_dict, index=[0])
     df.to_csv(os.path.join(log_dir, 'result.csv'), index=False)
     
-    log(f'best test loss: {best_test_loss:.4f} top5 acc: {best_top5_acc:.2f} top1 acc: {best_top1_acc:.2f} at epoch {best_test_epoch}')
+    log(
+        f'best test contrastive loss: {best_test_cl:.4f} '
+        f'(total test loss at selected epoch: {best_test_loss:.4f}) '
+        f'top5 acc: {best_top5_acc:.2f} top1 acc: {best_top1_acc:.2f} '
+        f'at epoch {best_test_epoch}'
+    )

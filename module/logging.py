@@ -32,17 +32,14 @@ def format_loss_breakdown(tag: str, avg_comp: Dict[str, float], ivae_enabled: bo
 
     return (
         f"{tag} total={avg_comp.get('total', 0.0):.4f} "
-        f"rec={avg_comp.get('recon', 0.0):.4f} "
-        f"KL[s/i/is/n]={avg_comp.get('kl_s', 0.0):.3f}/"
-        f"{avg_comp.get('kl_i', 0.0):.3f}/"
-        f"{avg_comp.get('kl_is', 0.0):.3f}/"
-        f"{avg_comp.get('kl_n', 0.0):.3f} "
-        f"WKL[s/i/is/n]={avg_comp.get('kl_s_weighted', 0.0):.3f}/"
-        f"{avg_comp.get('kl_i_weighted', 0.0):.3f}/"
-        f"{avg_comp.get('kl_is_weighted', 0.0):.3f}/"
-        f"{avg_comp.get('kl_n_weighted', 0.0):.3f} "
+        f"rec={avg_comp.get('recon', 0.0):.4f}->{avg_comp.get('recon_weighted', avg_comp.get('recon', 0.0)):.4f} "
+        f"KL[s/i]={avg_comp.get('kl_s', 0.0):.3f}/{avg_comp.get('kl_i', 0.0):.3f} "
+        f"WKL[s/i]={avg_comp.get('kl_s_weighted', 0.0):.3f}/{avg_comp.get('kl_i_weighted', 0.0):.3f} "
         f"C={avg_comp.get('C', 0.0):.3f} "
-        f"CL={avg_comp.get('contrastive', 0.0):.3f}->{avg_comp.get('contrastive_weighted', 0.0):.3f}"
+        f"CL={avg_comp.get('contrastive', 0.0):.3f}->{avg_comp.get('contrastive_weighted', 0.0):.3f} "
+        f"SubjCE[zs]={avg_comp.get('subj_ce_zs', 0.0):.3f}->{avg_comp.get('subj_ce_zs_weighted', 0.0):.3f} "
+        f"AdvCE[zi]={avg_comp.get('subj_ce_zi_adv', 0.0):.3f}->{avg_comp.get('subj_ce_zi_adv_weighted', 0.0):.3f} "
+        f"SubjAcc[zs/zi]={avg_comp.get('subj_acc_zs', 0.0):.3f}/{avg_comp.get('subj_acc_zi_adv', 0.0):.3f}"
     )
 
 

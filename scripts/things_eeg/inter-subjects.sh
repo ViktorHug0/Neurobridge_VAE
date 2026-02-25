@@ -12,7 +12,7 @@ DEVICE="cuda:0"
 EEG_ENCODER_TYPE="TSConv"
 BATCH_SIZE=1024
 LEARNING_RATE=1e-4
-NUM_EPOCHS=50
+NUM_EPOCHS=35
 # SELECTED_CHANNELS=('P7' 'P5' 'P3' 'P1' 'Pz' 'P2' 'P4' 'P6' 'P8' 'PO7' 'PO3' 'POz' 'PO4' 'PO8' 'O1' 'Oz' 'O2')
 SELECTED_CHANNELS=() # "Oz" "O1" "O2" "POz" "PO3" "PO4" "PO7" "PO8" "Pz" "P1" "P2" "P3" "P4" "P5" "P6" "P7" "P8" "TP7" "TP8" "T7" "T8" "FT7" "FT8")
 PROJECTOR="linear"
@@ -21,11 +21,11 @@ OUTPUT_DIR="./results/things_eeg/inter-subjects"
 NUM_WORKERS="4" # "$(nproc)"
 
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
-RUN_DIR="${OUTPUT_DIR}/${RUN_ID}"
+RUN_DIR="${OUTPUT_DIR}/${RUN_ID}_VAE"
 mkdir -p "$RUN_DIR"
 echo "$RUN_DIR" > "${OUTPUT_DIR}/last_run.txt"
 
-for SUB_ID in {1..2}
+for SUB_ID in {1..10}
 do
     OUTPUT_NAME=$(printf "sub-%02d" $SUB_ID)
     echo "Training subject ${SUB_ID}..."
@@ -61,27 +61,27 @@ do
         --save_weights \
         --ivae \
         --z_s_dim 16 \
-        --z_i_dim 256 \
-        --z_is_dim 32 \
-        --z_n_dim 8 \
-        --beta_s 1.0 \
-        --beta_i 1.0 \
-        --beta_is 1.0 \
-        --beta_n 1.0 \
+        --z_i_dim 128 \
+        --beta_s 0.01 \
+        --beta_i 0.0001 \
+        --lambda_recon 0.1 \
         --gamma_cl 1.0 \
+        --lambda_subj_zs 0.001 \
+        --lambda_subj_zi_adv 0.001 \
+        --grl_lambda 0.001 \
         --C_max 25.0 \
         --C_stop_iter 10000 \
         --ivae_hidden_dim 512 \
-        --subj_emb_dim 32 \
         --ivae_n_layers 1 \
         --n_subjects 11 \
         --retrieval_feature "z_i" \
-        --seed 2025;
+        --multi_positive_loss \
+        --image_prior_hidden_dim 128 \
+        --seed 201723;
 done
 
 python compute_avg_results.py --result_dir "$RUN_DIR";
-
-        # --image_aug
+        # --image_aug    
         # --aug_image_feature_dirs "./data/things_eeg/image_feature/RN50/GaussianBlur-GaussianNoise-LowResolution-Mosaic"
         # --eeg_aug
         # --eeg_aug_type "smooth"
@@ -91,21 +91,16 @@ python compute_avg_results.py --result_dir "$RUN_DIR";
         # --ivae
         # --z_s_dim 16
         # --z_i_dim 256
-        # --z_is_dim 32
-        # --z_n_dim 8
         # --beta_s 1.0
         # --beta_i 1.0
-        # --beta_is 1.0
-        # --beta_n 1.0
         # --gamma_cl 1.0
-        # --C_max 25.0
-        # --C_stop_iter 10000
+        # --lambda_subj_zs 1.0
+        # --lambda_subj_zi_adv 0.1
+        # --grl_lambda 0.1
         # --ivae_hidden_dim 512
-        # --subj_emb_dim 32
         # --ivae_n_layers 1
         # --n_subjects 10
         # --retrieval_feature "z_i"      # or "full_z"
-        # --reconstruct_raw_eeg          # decode to raw EEG instead of backbone embedding
         # --multi_positive_loss
 
         # ── Scheduler flags (uncomment to enable) ──
@@ -115,3 +110,4 @@ python compute_avg_results.py --result_dir "$RUN_DIR";
         # --warmup_steps 500
         # --warmup_factor 0.333
         # --warmup_method "linear"
+
