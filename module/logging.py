@@ -25,21 +25,67 @@ def average_components(acc: dict, n: int) -> Dict[str, float]:
     return {k: v / n for k, v in acc.items()}
 
 
-def format_loss_breakdown(tag: str, avg_comp: Dict[str, float], ivae_enabled: bool) -> str:
+def format_loss_breakdown(
+    tag: str,
+    avg_comp: Dict[str, float],
+    ivae_enabled: bool,
+    use_color: bool = False,
+) -> str:
     """Return a compact one-line loss breakdown for console logging."""
+    if not use_color:
+        if not ivae_enabled:
+            return f"{tag} total={avg_comp.get('total', 0.0):.4f}"
+
+        return (
+            f"{tag} total={avg_comp.get('total', 0.0):.4f} "
+            f"rec={avg_comp.get('recon', 0.0):.4f}->{avg_comp.get('recon_weighted', avg_comp.get('recon', 0.0)):.4f} "
+            f"KL[s/i]={avg_comp.get('kl_s', 0.0):.3f}/{avg_comp.get('kl_i', 0.0):.3f} "
+            f"WKL[s/i]={avg_comp.get('kl_s_weighted', 0.0):.3f}/{avg_comp.get('kl_i_weighted', 0.0):.3f} "
+            f"C={avg_comp.get('C', 0.0):.3f} "
+            f"CL={avg_comp.get('contrastive', 0.0):.3f}->{avg_comp.get('contrastive_weighted', 0.0):.3f} "
+            f"SubjCE[zs]={avg_comp.get('subj_ce_zs', 0.0):.3f}->{avg_comp.get('subj_ce_zs_weighted', 0.0):.3f} "
+            f"AdvCE[zi]={avg_comp.get('subj_ce_zi_adv', 0.0):.3f}->{avg_comp.get('subj_ce_zi_adv_weighted', 0.0):.3f} "
+            f"SubjAcc[zs/zi]={avg_comp.get('subj_acc_zs', 0.0):.3f}/{avg_comp.get('subj_acc_zi_adv', 0.0):.3f}"
+        )
+
+    ansi_reset = "\033[0m"
+    if "[test]" in tag.lower():
+        c_tag = "\033[1;35m"  # bright magenta
+        c_key = "\033[35m"    # magenta
+        c_val = "\033[1;33m"  # bright yellow
+    else:
+        c_tag = "\033[1;36m"  # bright cyan
+        c_key = "\033[36m"    # cyan
+        c_val = "\033[1;32m"  # bright green
+
+    def kv(key: str, val: str) -> str:
+        return f"{c_key}{key}{ansi_reset}{c_val}{val}{ansi_reset}"
+
     if not ivae_enabled:
-        return f"{tag} total={avg_comp.get('total', 0.0):.4f}"
+        total_val = f"{avg_comp.get('total', 0.0):.4f}"
+        return f"{c_tag}{tag}{ansi_reset} {kv('total=', total_val)}"
+
+    total = f"{avg_comp.get('total', 0.0):.4f}"
+    rec = f"{avg_comp.get('recon', 0.0):.4f}->{avg_comp.get('recon_weighted', avg_comp.get('recon', 0.0)):.4f}"
+    kl = f"{avg_comp.get('kl_s', 0.0):.3f}/{avg_comp.get('kl_i', 0.0):.3f}"
+    wkl = f"{avg_comp.get('kl_s_weighted', 0.0):.3f}/{avg_comp.get('kl_i_weighted', 0.0):.3f}"
+    capacity_str = f"{avg_comp.get('C', 0.0):.3f}"
+    cl = f"{avg_comp.get('contrastive', 0.0):.3f}->{avg_comp.get('contrastive_weighted', 0.0):.3f}"
+    subj_ce_zs = f"{avg_comp.get('subj_ce_zs', 0.0):.3f}->{avg_comp.get('subj_ce_zs_weighted', 0.0):.3f}"
+    subj_ce_zi = f"{avg_comp.get('subj_ce_zi_adv', 0.0):.3f}->{avg_comp.get('subj_ce_zi_adv_weighted', 0.0):.3f}"
+    subj_acc = f"{avg_comp.get('subj_acc_zs', 0.0):.3f}/{avg_comp.get('subj_acc_zi_adv', 0.0):.3f}"
 
     return (
-        f"{tag} total={avg_comp.get('total', 0.0):.4f} "
-        f"rec={avg_comp.get('recon', 0.0):.4f}->{avg_comp.get('recon_weighted', avg_comp.get('recon', 0.0)):.4f} "
-        f"KL[s/i]={avg_comp.get('kl_s', 0.0):.3f}/{avg_comp.get('kl_i', 0.0):.3f} "
-        f"WKL[s/i]={avg_comp.get('kl_s_weighted', 0.0):.3f}/{avg_comp.get('kl_i_weighted', 0.0):.3f} "
-        f"C={avg_comp.get('C', 0.0):.3f} "
-        f"CL={avg_comp.get('contrastive', 0.0):.3f}->{avg_comp.get('contrastive_weighted', 0.0):.3f} "
-        f"SubjCE[zs]={avg_comp.get('subj_ce_zs', 0.0):.3f}->{avg_comp.get('subj_ce_zs_weighted', 0.0):.3f} "
-        f"AdvCE[zi]={avg_comp.get('subj_ce_zi_adv', 0.0):.3f}->{avg_comp.get('subj_ce_zi_adv_weighted', 0.0):.3f} "
-        f"SubjAcc[zs/zi]={avg_comp.get('subj_acc_zs', 0.0):.3f}/{avg_comp.get('subj_acc_zi_adv', 0.0):.3f}"
+        f"{c_tag}{tag}{ansi_reset} "
+        f"{kv('total=', total)} "
+        f"{kv('rec=', rec)} "
+        f"{kv('KL[s/i]=', kl)} "
+        f"{kv('WKL[s/i]=', wkl)} "
+        f"{kv('C=', capacity_str)} "
+        f"{kv('CL=', cl)} "
+        f"{kv('SubjCE[zs]=', subj_ce_zs)} "
+        f"{kv('AdvCE[zi]=', subj_ce_zi)} "
+        f"{kv('SubjAcc[zs/zi]=', subj_acc)}"
     )
 
 

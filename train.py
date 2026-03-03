@@ -9,9 +9,11 @@ import sys
 import shutil
 
 import torch
+import torch.nn.functional as F
+import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
@@ -97,9 +99,9 @@ def save_loss_component_plots(
         if top1 is not None and len(top1) > 0:
             n = min(len(epochs), len(top1))
             ax2 = ax.twinx()
-            ax2.plot(epochs[:n], top1[:n], color="black", linewidth=2.0, linestyle="-.", label="test/top1_acc(%)")
+            ax2.plot(epochs[:n], top1[:n], color="black", linewidth=2.0, linestyle="--", label="test/top1_acc(%)")
             ax2.set_ylabel("top1 acc (%)")
-            ax2.set_ylim(0.0, 100.0)
+            ax2.set_ylim(0.0, 40.0)
             h2, l2 = ax2.get_legend_handles_labels()
         else:
             ax2 = None
@@ -146,7 +148,6 @@ def save_loss_component_plots(
     return {
         "raw": _plot(raw_keys, "Loss evolution (raw components)", "loss_components_raw.png"),
         "scaled": _plot(scaled_keys, "Loss evolution (scaled components)", "loss_components_scaled.png"),
-        "weighted": _plot(scaled_keys, "Loss evolution (scaled components)", "loss_components_weighted.png"),
         "raw_log": _plot(raw_keys, "Loss evolution (raw components, log-y)", "loss_components_raw_log.png", use_log_y=True),
         "scaled_log": _plot(scaled_keys, "Loss evolution (scaled components, log-y)", "loss_components_scaled_log.png", use_log_y=True),
     }
@@ -214,6 +215,11 @@ if __name__ == '__main__':
     
     parser.add_argument('--seed', type=int, default=None, help='random seed for reproducibility')
     parser.add_argument('--multi_positive_loss', action='store_true', help='use multi-positive contrastive loss based on (object_idx, image_idx) within batch')
+    parser.add_argument(
+        '--subject_probe_holdout',
+        action='store_true',
+        help='use fixed per-subject 90/10 split: 90% for training losses, 10% for detached subject probe validation',
+    )
 
     # ── iVAE arguments ──
     parser.add_argument('--ivae', action='store_true', help='enable iVAE bottleneck between EEG encoder and contrastive loss')
@@ -288,9 +294,24 @@ if __name__ == '__main__':
         filemode='w'
     )
 
-    def log(str):
-        logging.info(str)
-        print(str)
+    use_terminal_color = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+    def log(msg: str, console_msg: str | None = None):
+        logging.info(msg)
+        print(console_msg if console_msg is not None else msg)
+
+    ansi = {
+        "reset": "\033[0m",
+        "train": "\033[1;36m",
+        "test": "\033[1;35m",
+        "metric": "\033[1;33m",
+        "red": "\033[1;31m",
+    }
+
+    def colorize(text: str, color: str) -> str:
+        if not use_terminal_color:
+            return text
+        return f"{color}{text}{ansi['reset']}"
 
     log('Input arguments:')
     for key, val in vars(args).items():
@@ -328,8 +349,64 @@ if __name__ == '__main__':
     log(f'number of channels: {channels_num}')
 
     pin_memory = device.type == "cuda"
+    subj_probe_train_dataloader = None
+    subj_probe_val_dataloader = None
+    train_main_dataset = train_dataset
+
+    if args.subject_probe_holdout:
+        if args.data_random:
+            raise ValueError("--subject_probe_holdout requires deterministic indexing (disable --data_random).")
+        if len(args.train_subject_ids) <= 1:
+            raise ValueError("--subject_probe_holdout requires at least two training subjects.")
+
+        num_subjects_train = len(args.train_subject_ids)
+        if len(train_dataset) % num_subjects_train != 0:
+            raise ValueError(
+                "Train dataset length is not divisible by number of train subjects; cannot build a per-subject fixed split."
+            )
+        per_subject_len = len(train_dataset) // num_subjects_train
+        if per_subject_len <= 1:
+            raise ValueError("Per-subject train length too small for a 90/10 split.")
+
+        rng = np.random.default_rng(seed + 137)
+        main_train_indices: list[int] = []
+        subj_cls_indices: list[int] = []
+        holdout_per_subject = min(max(1, int(np.floor(per_subject_len * 0.1))), per_subject_len - 1)
+
+        for subject_idx in range(num_subjects_train):
+            start = subject_idx * per_subject_len
+            end = start + per_subject_len
+            perm = rng.permutation(np.arange(start, end, dtype=np.int64))
+            subj_cls_indices.extend(perm[:holdout_per_subject].tolist())
+            main_train_indices.extend(perm[holdout_per_subject:].tolist())
+
+        train_main_dataset = Subset(train_dataset, main_train_indices)
+        subj_cls_val_dataset = Subset(train_dataset, subj_cls_indices)
+        log(
+            f"Enabled subject probe holdout split: per_subject={per_subject_len}, "
+            f"train(90%)={len(main_train_indices)}, probe_val(10%)={len(subj_cls_indices)}"
+        )
+        subj_probe_train_dataloader = DataLoader(
+            train_main_dataset,
+            batch_size=256,  # Keep probe batches small to reduce GPU memory pressure.
+            shuffle=True,
+            drop_last=False,
+            num_workers=args.num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=(args.num_workers > 0),
+        )
+        subj_probe_val_dataloader = DataLoader(
+            subj_cls_val_dataset,
+            batch_size=256,
+            shuffle=False,
+            drop_last=False,
+            num_workers=args.num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=(args.num_workers > 0),
+        )
+
     dataloader = DataLoader(
-        train_dataset,
+        train_main_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         drop_last=True,
@@ -380,6 +457,8 @@ if __name__ == '__main__':
     ivae_model = None
     subj_cls_zs = None
     subj_cls_zi_adv = None
+    subj_probe_zs = None
+    subj_probe_optimizer = None
     if args.ivae:
         ivae_model = EEGSubjectCondVAE(
             feature_dim=feature_dim,
@@ -405,6 +484,11 @@ if __name__ == '__main__':
         log(f'Subject head(z_s) trainable parameters: {zs_head_params / 1e6:.2f}M')
         log(f'Subject adversary(z_i) trainable parameters: {zi_head_params / 1e6:.2f}M')
         log(str(ivae_model))
+
+        if args.subject_probe_holdout:
+            # Linear probe trained on detached z_s samples; never backpropagates into iVAE.
+            subj_probe_zs = nn.Linear(args.z_s_dim, num_subject_classes).to(device)
+            subj_probe_optimizer = optim.Adam(subj_probe_zs.parameters(), lr=1e-3)
 
     # Determine eeg projector input dim (depends on iVAE mode)
     if args.ivae:
@@ -493,7 +577,6 @@ if __name__ == '__main__':
         total_loss = 0.0
         train_comp_sums = init_component_sums()
         train_comp_count = 0
-
         for batch in tqdm(dataloader, desc=f"Epoch {epoch}/{args.num_epochs} [Train]"):
             eeg_batch = batch[0].to(device)
             subject_id_batch = batch[3].to(device).long()
@@ -537,13 +620,6 @@ if __name__ == '__main__':
                 else:
                     cl_loss = criterion(eeg_proj, img_proj, text_proj)
 
-                # Subject labels are expected in [0, n_classes-1]
-                subj_labels = (subject_id_batch - 1).clamp(min=0, max=args.n_subjects - 2)
-                subj_logits_zs = subj_cls_zs(ivae_out['z_s'])
-                subj_logits_zi_adv = subj_cls_zi_adv(
-                    grad_reverse(ivae_out['z_i'], lambda_grl=args.grl_lambda)
-                )
-
                 loss, loss_components = scvae_loss(
                     ivae_out, eeg_feature_batch.detach(),
                     beta_s=args.beta_s,
@@ -551,12 +627,28 @@ if __name__ == '__main__':
                     lambda_recon=args.lambda_recon,
                     lambda_cl=args.gamma_cl,
                     contrastive_loss_val=cl_loss,
-                    subj_logits_zs=subj_logits_zs,
-                    subj_logits_zi_adv=subj_logits_zi_adv,
-                    subj_labels=subj_labels,
-                    lambda_subj_zs=args.lambda_subj_zs,
-                    lambda_subj_zi_adv=args.lambda_subj_zi_adv,
                 )
+
+                if not args.subject_probe_holdout:
+                    # Default behavior: subject heads contribute gradients to iVAE.
+                    subj_labels = (subject_id_batch - 1).clamp(min=0, max=args.n_subjects - 2)
+                    subj_logits_zs = subj_cls_zs(ivae_out['z_s'])
+                    subj_logits_zi_adv = subj_cls_zi_adv(
+                        grad_reverse(ivae_out['z_i'], lambda_grl=args.grl_lambda)
+                    )
+                    loss_subj_zs = F.cross_entropy(subj_logits_zs, subj_labels)
+                    loss_subj_zi_adv = F.cross_entropy(subj_logits_zi_adv, subj_labels)
+                    loss = loss + args.lambda_subj_zs * loss_subj_zs + args.lambda_subj_zi_adv * loss_subj_zi_adv
+                    pred_zs = torch.argmax(subj_logits_zs, dim=1)
+                    pred_zi = torch.argmax(subj_logits_zi_adv, dim=1)
+                    loss_components["subj_ce_zs"] = loss_subj_zs.detach()
+                    loss_components["subj_ce_zs_weighted"] = (args.lambda_subj_zs * loss_subj_zs).detach()
+                    loss_components["subj_acc_zs"] = (pred_zs == subj_labels).float().mean().detach()
+                    loss_components["subj_ce_zi_adv"] = loss_subj_zi_adv.detach()
+                    loss_components["subj_ce_zi_adv_weighted"] = (args.lambda_subj_zi_adv * loss_subj_zi_adv).detach()
+                    loss_components["subj_acc_zi_adv"] = (pred_zi == subj_labels).float().mean().detach()
+
+                loss_components["total"] = loss.detach()
                 global_step += 1
 
             # ── Standard (non-iVAE) path ──
@@ -586,8 +678,115 @@ if __name__ == '__main__':
         avg_train_comp = average_components(train_comp_sums, train_comp_count)
         write_component_scalars(writer, 'train', avg_train_comp, epoch)
         append_loss_history(train_loss_history, avg_train_comp)
-        log(f"Epoch [{epoch}/{args.num_epochs}] Train Loss: {avg_loss:.4f}")
-        log(format_loss_breakdown("[Train]", avg_train_comp, args.ivae and ivae_model is not None))
+        train_epoch_line = f"Epoch [{epoch}/{args.num_epochs}] Train Loss: {avg_loss:.4f}"
+        log(train_epoch_line, colorize(train_epoch_line, ansi["train"]))
+        train_breakdown_plain = format_loss_breakdown("[Train]", avg_train_comp, args.ivae and ivae_model is not None)
+        train_breakdown_color = format_loss_breakdown(
+            "[Train]",
+            avg_train_comp,
+            args.ivae and ivae_model is not None,
+            use_color=use_terminal_color,
+        )
+        log(train_breakdown_plain, train_breakdown_color)
+
+        # Probe mode: train a detached linear classifier on sampled z_s and report holdout accuracy.
+        if (
+            args.subject_probe_holdout
+            and args.ivae
+            and ivae_model is not None
+            and subj_probe_zs is not None
+            and subj_probe_optimizer is not None
+            and subj_probe_train_dataloader is not None
+            and subj_probe_val_dataloader is not None
+        ):
+            model.eval()
+            ivae_model.eval()
+            subj_probe_zs.train()
+            probe_train_acc_sum = 0.0
+            probe_train_loss_sum = 0.0
+            probe_train_batches = 0
+            for probe_batch in subj_probe_train_dataloader:
+                eeg_probe = probe_batch[0].to(device)
+                subject_id_probe = probe_batch[3].to(device).long()
+                image_probe = probe_batch[1].to(device)
+                with torch.no_grad():
+                    if args.eeg_encoder_type in ['ATM']:
+                        eeg_probe_feature = model(eeg_probe, subject_id_probe)
+                    else:
+                        eeg_probe_feature = model(eeg_probe)
+                    u_probe = get_subject_signatures(subject_id_probe, device, dtype=eeg_probe_feature.dtype)
+                    ivae_probe_out = ivae_model(
+                        eeg_probe_feature,
+                        u_probe,
+                        img_feat=image_probe if args.image_prior_cond_on_image else None,
+                        global_step=global_step,
+                        C_max=args.C_max,
+                        C_stop_iter=args.C_stop_iter,
+                    )
+                    q_s_mu_probe, q_s_lv_probe = ivae_probe_out['posterior_params']['s']
+                    z_s_probe = q_s_mu_probe + torch.randn_like(q_s_mu_probe) * torch.exp(0.5 * q_s_lv_probe)
+                probe_labels = (subject_id_probe - 1).clamp(min=0, max=args.n_subjects - 2)
+                subj_probe_optimizer.zero_grad()
+                probe_logits = subj_probe_zs(z_s_probe.detach())
+                probe_loss = F.cross_entropy(probe_logits, probe_labels)
+                probe_loss.backward()
+                subj_probe_optimizer.step()
+                probe_pred = torch.argmax(probe_logits, dim=1)
+                probe_train_acc_sum += float((probe_pred == probe_labels).float().mean().item())
+                probe_train_loss_sum += float(probe_loss.item())
+                probe_train_batches += 1
+
+            subj_probe_zs.eval()
+            probe_val_acc_sum = 0.0
+            probe_val_batches = 0
+            with torch.no_grad():
+                for probe_val_batch in subj_probe_val_dataloader:
+                    eeg_probe_val = probe_val_batch[0].to(device)
+                    subject_id_probe_val = probe_val_batch[3].to(device).long()
+                    image_probe_val = probe_val_batch[1].to(device)
+
+                    if args.eeg_encoder_type in ['ATM']:
+                        eeg_probe_val_feature = model(eeg_probe_val, subject_id_probe_val)
+                    else:
+                        eeg_probe_val_feature = model(eeg_probe_val)
+                    u_probe_val = get_subject_signatures(subject_id_probe_val, device, dtype=eeg_probe_val_feature.dtype)
+                    ivae_probe_val_out = ivae_model(
+                        eeg_probe_val_feature,
+                        u_probe_val,
+                        img_feat=image_probe_val if args.image_prior_cond_on_image else None,
+                        global_step=global_step,
+                        C_max=args.C_max,
+                        C_stop_iter=args.C_stop_iter,
+                    )
+                    q_s_mu_probe_val, q_s_lv_probe_val = ivae_probe_val_out['posterior_params']['s']
+                    z_s_probe_val = q_s_mu_probe_val + torch.randn_like(q_s_mu_probe_val) * torch.exp(0.5 * q_s_lv_probe_val)
+                    probe_val_labels = (subject_id_probe_val - 1).clamp(min=0, max=args.n_subjects - 2)
+                    probe_val_logits = subj_probe_zs(z_s_probe_val)
+                    probe_val_pred = torch.argmax(probe_val_logits, dim=1)
+                    probe_val_acc_sum += float((probe_val_pred == probe_val_labels).float().mean().item())
+                    probe_val_batches += 1
+
+            if probe_train_batches > 0 and probe_val_batches > 0:
+                probe_train_acc = probe_train_acc_sum / probe_train_batches
+                probe_train_loss = probe_train_loss_sum / probe_train_batches
+                probe_val_acc = probe_val_acc_sum / probe_val_batches
+                writer.add_scalar('SubjectProbe/zs_train_acc', probe_train_acc, epoch)
+                writer.add_scalar('SubjectProbe/zs_train_loss', probe_train_loss, epoch)
+                writer.add_scalar('SubjectProbe/zs_val_acc', probe_val_acc, epoch)
+                probe_line_plain = (
+                    f"SubjProbe[z_s] TrainAcc={probe_train_acc:.3f} ValAcc={probe_val_acc:.3f} "
+                    f"TrainCE={probe_train_loss:.3f}"
+                )
+                if use_terminal_color:
+                    probe_line_color = (
+                        f"{colorize('SubjProbe[z_s]', ansi['test'])} "
+                        f"{colorize(f'TrainAcc={probe_train_acc:.3f}', ansi['metric'])} "
+                        f"{colorize(f'ValAcc={probe_val_acc:.3f}', ansi['red'])} "
+                        f"{colorize(f'TrainCE={probe_train_loss:.3f}', ansi['metric'])}"
+                    )
+                else:
+                    probe_line_color = probe_line_plain
+                log(probe_line_plain, probe_line_color)
 
         if args.save_weights:
             ckpt = {
@@ -659,11 +858,16 @@ if __name__ == '__main__':
                     else:
                         cl_loss = criterion(eeg_proj, img_proj, text_proj)
 
-                    subj_labels = (subject_id_batch - 1).clamp(min=0, max=args.n_subjects - 2)
-                    subj_logits_zs = subj_cls_zs(ivae_out['z_s'])
-                    subj_logits_zi_adv = subj_cls_zi_adv(
-                        grad_reverse(ivae_out['z_i'], lambda_grl=args.grl_lambda)
-                    )
+                    if args.subject_probe_holdout:
+                        subj_labels = None
+                        subj_logits_zs = None
+                        subj_logits_zi_adv = None
+                    else:
+                        subj_labels = (subject_id_batch - 1).clamp(min=0, max=args.n_subjects - 2)
+                        subj_logits_zs = subj_cls_zs(ivae_out['z_s'])
+                        subj_logits_zi_adv = subj_cls_zi_adv(
+                            grad_reverse(ivae_out['z_i'], lambda_grl=args.grl_lambda)
+                        )
 
                     loss, test_loss_components = scvae_loss(
                         ivae_out, eeg_feature_batch,
@@ -717,8 +921,24 @@ if __name__ == '__main__':
         top1_acc = top1_count / total * 100
         # Track retrieval quality alongside loss components for plotting.
         test_loss_history.setdefault("top1_acc", []).append(float(top1_acc))
-        log(f"top5 acc {top5_acc:.2f}%\ttop1 acc {top1_acc:.2f}%\tTest Loss: {avg_test_loss:.4f}")
-        log(format_loss_breakdown("[Test]", avg_test_comp, args.ivae and ivae_model is not None))
+        test_line_plain = f"top5 acc {top5_acc:.2f}%\ttop1 acc {top1_acc:.2f}%\tTest Loss: {avg_test_loss:.4f}"
+        if use_terminal_color:
+            test_line_color = (
+                f"{colorize('top5 acc', ansi['test'])} {colorize(f'{top5_acc:.2f}%', ansi['red'])}\t"
+                f"{colorize('top1 acc', ansi['test'])} {colorize(f'{top1_acc:.2f}%', ansi['red'])}\t"
+                f"{colorize('Test Loss:', ansi['test'])} {colorize(f'{avg_test_loss:.4f}', ansi['metric'])}"
+            )
+        else:
+            test_line_color = test_line_plain
+        log(test_line_plain, test_line_color)
+        test_breakdown_plain = format_loss_breakdown("[Test]", avg_test_comp, args.ivae and ivae_model is not None)
+        test_breakdown_color = format_loss_breakdown(
+            "[Test]",
+            avg_test_comp,
+            args.ivae and ivae_model is not None,
+            use_color=use_terminal_color,
+        )
+        log(test_breakdown_plain, test_breakdown_color)
 
         # Save the best model
         curr_test_cl = avg_test_comp.get('contrastive', avg_test_loss)

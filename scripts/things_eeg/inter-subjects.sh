@@ -12,18 +12,24 @@ DEVICE="cuda:0"
 EEG_ENCODER_TYPE="TSConv"
 BATCH_SIZE=1024
 LEARNING_RATE=1e-4
-NUM_EPOCHS=35
+NUM_EPOCHS=40
 # SELECTED_CHANNELS=('P7' 'P5' 'P3' 'P1' 'Pz' 'P2' 'P4' 'P6' 'P8' 'PO7' 'PO3' 'POz' 'PO4' 'PO8' 'O1' 'Oz' 'O2')
 SELECTED_CHANNELS=() # "Oz" "O1" "O2" "POz" "PO3" "PO4" "PO7" "PO8" "Pz" "P1" "P2" "P3" "P4" "P5" "P6" "P7" "P8" "TP7" "TP8" "T7" "T8" "FT7" "FT8")
 PROJECTOR="linear"
 FEATURE_DIM=512
 OUTPUT_DIR="./results/things_eeg/inter-subjects"
 NUM_WORKERS="4" # "$(nproc)"
+SUBJECT_PROBE_HOLDOUT=false
 
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 RUN_DIR="${OUTPUT_DIR}/${RUN_ID}_VAE"
 mkdir -p "$RUN_DIR"
 echo "$RUN_DIR" > "${OUTPUT_DIR}/last_run.txt"
+
+SUBJECT_PROBE_HOLDOUT_FLAG=""
+if [ "$SUBJECT_PROBE_HOLDOUT" = true ]; then
+    SUBJECT_PROBE_HOLDOUT_FLAG="--subject_probe_holdout"
+fi
 
 for SUB_ID in {1..10}
 do
@@ -59,24 +65,12 @@ do
         --feature_dim "$FEATURE_DIM" \
         --data_average \
         --save_weights \
-        --ivae \
-        --z_s_dim 16 \
-        --z_i_dim 128 \
-        --beta_s 0.01 \
-        --beta_i 0.0001 \
-        --lambda_recon 0.1 \
         --gamma_cl 1.0 \
-        --lambda_subj_zs 0.001 \
-        --lambda_subj_zi_adv 0.001 \
-        --grl_lambda 0.001 \
-        --C_max 25.0 \
-        --C_stop_iter 10000 \
-        --ivae_hidden_dim 512 \
-        --ivae_n_layers 1 \
         --n_subjects 11 \
         --retrieval_feature "z_i" \
         --multi_positive_loss \
-        --image_prior_hidden_dim 128 \
+        $SUBJECT_PROBE_HOLDOUT_FLAG \
+        --image_prior_hidden_dim 256 \
         --seed 201723;
 done
 
@@ -111,3 +105,16 @@ python compute_avg_results.py --result_dir "$RUN_DIR";
         # --warmup_factor 0.333
         # --warmup_method "linear"
 
+        # --ivae \
+        # --z_s_dim 32 \
+        # --z_i_dim 256 \
+        # --beta_s 0.1 \
+        # --beta_i 0.01 \
+        # --lambda_recon 1 \
+        # --lambda_subj_zs 0.0 \
+        # --lambda_subj_zi_adv 0.0 \
+        # --grl_lambda 0.0 \
+        # --C_max 0.0 \
+        # --C_stop_iter 10000 \
+        # --ivae_hidden_dim 512 \
+        # --ivae_n_layers 1 \
