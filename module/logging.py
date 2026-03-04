@@ -39,13 +39,13 @@ def format_loss_breakdown(
         return (
             f"{tag} total={avg_comp.get('total', 0.0):.4f} "
             f"rec={avg_comp.get('recon', 0.0):.4f}->{avg_comp.get('recon_weighted', avg_comp.get('recon', 0.0)):.4f} "
-            f"KL[s/i]={avg_comp.get('kl_s', 0.0):.3f}/{avg_comp.get('kl_i', 0.0):.3f} "
-            f"WKL[s/i]={avg_comp.get('kl_s_weighted', 0.0):.3f}/{avg_comp.get('kl_i_weighted', 0.0):.3f} "
+            f"KL[s/is/i/n]={avg_comp.get('kl_s', 0.0):.3f}/{avg_comp.get('kl_is', 0.0):.3f}/{avg_comp.get('kl_i', 0.0):.3f}/{avg_comp.get('kl_n', 0.0):.3f} "
+            f"WKL[s/is/i/n]={avg_comp.get('kl_s_weighted', 0.0):.3f}/{avg_comp.get('kl_is_weighted', 0.0):.3f}/{avg_comp.get('kl_i_weighted', 0.0):.3f}/{avg_comp.get('kl_n_weighted', 0.0):.3f} "
             f"C={avg_comp.get('C', 0.0):.3f} "
             f"CL={avg_comp.get('contrastive', 0.0):.3f}->{avg_comp.get('contrastive_weighted', 0.0):.3f} "
-            f"SubjCE[zs]={avg_comp.get('subj_ce_zs', 0.0):.3f}->{avg_comp.get('subj_ce_zs_weighted', 0.0):.3f} "
-            f"AdvCE[zi]={avg_comp.get('subj_ce_zi_adv', 0.0):.3f}->{avg_comp.get('subj_ce_zi_adv_weighted', 0.0):.3f} "
-            f"SubjAcc[zs/zi]={avg_comp.get('subj_acc_zs', 0.0):.3f}/{avg_comp.get('subj_acc_zi_adv', 0.0):.3f}"
+            f"SubjCE[cls]={avg_comp.get('subj_ce_cls', 0.0):.3f}->{avg_comp.get('subj_ce_cls_weighted', 0.0):.3f} "
+            f"AdvCE[adv]={avg_comp.get('subj_ce_adv', 0.0):.3f}->{avg_comp.get('subj_ce_adv_weighted', 0.0):.3f} "
+            f"SubjAcc[cls/adv]={avg_comp.get('subj_acc_cls', 0.0):.3f}/{avg_comp.get('subj_acc_adv', 0.0):.3f}"
         )
 
     ansi_reset = "\033[0m"
@@ -67,25 +67,25 @@ def format_loss_breakdown(
 
     total = f"{avg_comp.get('total', 0.0):.4f}"
     rec = f"{avg_comp.get('recon', 0.0):.4f}->{avg_comp.get('recon_weighted', avg_comp.get('recon', 0.0)):.4f}"
-    kl = f"{avg_comp.get('kl_s', 0.0):.3f}/{avg_comp.get('kl_i', 0.0):.3f}"
-    wkl = f"{avg_comp.get('kl_s_weighted', 0.0):.3f}/{avg_comp.get('kl_i_weighted', 0.0):.3f}"
+    kl = f"{avg_comp.get('kl_s', 0.0):.3f}/{avg_comp.get('kl_is', 0.0):.3f}/{avg_comp.get('kl_i', 0.0):.3f}/{avg_comp.get('kl_n', 0.0):.3f}"
+    wkl = f"{avg_comp.get('kl_s_weighted', 0.0):.3f}/{avg_comp.get('kl_is_weighted', 0.0):.3f}/{avg_comp.get('kl_i_weighted', 0.0):.3f}/{avg_comp.get('kl_n_weighted', 0.0):.3f}"
     capacity_str = f"{avg_comp.get('C', 0.0):.3f}"
     cl = f"{avg_comp.get('contrastive', 0.0):.3f}->{avg_comp.get('contrastive_weighted', 0.0):.3f}"
-    subj_ce_zs = f"{avg_comp.get('subj_ce_zs', 0.0):.3f}->{avg_comp.get('subj_ce_zs_weighted', 0.0):.3f}"
-    subj_ce_zi = f"{avg_comp.get('subj_ce_zi_adv', 0.0):.3f}->{avg_comp.get('subj_ce_zi_adv_weighted', 0.0):.3f}"
-    subj_acc = f"{avg_comp.get('subj_acc_zs', 0.0):.3f}/{avg_comp.get('subj_acc_zi_adv', 0.0):.3f}"
+    subj_ce_cls = f"{avg_comp.get('subj_ce_cls', 0.0):.3f}->{avg_comp.get('subj_ce_cls_weighted', 0.0):.3f}"
+    subj_ce_adv = f"{avg_comp.get('subj_ce_adv', 0.0):.3f}->{avg_comp.get('subj_ce_adv_weighted', 0.0):.3f}"
+    subj_acc = f"{avg_comp.get('subj_acc_cls', 0.0):.3f}/{avg_comp.get('subj_acc_adv', 0.0):.3f}"
 
     return (
         f"{c_tag}{tag}{ansi_reset} "
         f"{kv('total=', total)} "
         f"{kv('rec=', rec)} "
-        f"{kv('KL[s/i]=', kl)} "
-        f"{kv('WKL[s/i]=', wkl)} "
+        f"{kv('KL[s/is/i/n]=', kl)} "
+        f"{kv('WKL[s/is/i/n]=', wkl)} "
         f"{kv('C=', capacity_str)} "
         f"{kv('CL=', cl)} "
-        f"{kv('SubjCE[zs]=', subj_ce_zs)} "
-        f"{kv('AdvCE[zi]=', subj_ce_zi)} "
-        f"{kv('SubjAcc[zs/zi]=', subj_acc)}"
+        f"{kv('SubjCE[cls]=', subj_ce_cls)} "
+        f"{kv('AdvCE[adv]=', subj_ce_adv)} "
+        f"{kv('SubjAcc[cls/adv]=', subj_acc)}"
     )
 
 

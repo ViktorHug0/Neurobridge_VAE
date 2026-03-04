@@ -37,120 +37,13 @@ from iVAE.iVAE_utils import (
     scvae_loss, WarmupMultiStepLR,
 )
 from module.subject_signature import get_subject_signatures
+from module.plotting import save_loss_component_plots, save_subject_probe_plot
 
 
 def append_loss_history(history: dict[str, list[float]], comp: dict[str, float]) -> None:
     """Append scalar component values to per-key history lists."""
     for k, v in comp.items():
         history.setdefault(k, []).append(float(v))
-
-
-def save_loss_component_plots(
-    train_history: dict[str, list[float]],
-    test_history: dict[str, list[float]],
-    epochs: list[int],
-    out_dir: str,
-) -> dict[str, str]:
-    """Save raw/scaled loss evolution plots (linear + log-y) and top1 curve."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import numpy as np
-
-    raw_keys = [
-        "total", "recon", "kl_s", "kl_i", "C", "contrastive", "subj_ce_zs", "subj_ce_zi_adv",
-    ]
-    scaled_keys = [
-        "total", "recon_weighted", "kl_s_weighted", "kl_i_weighted",
-        "contrastive_weighted", "subj_ce_zs_weighted", "subj_ce_zi_adv_weighted",
-    ]
-
-    def _plot(keys: list[str], title: str, filename: str, use_log_y: bool = False) -> str:
-        fig, ax = plt.subplots(figsize=(11, 6), constrained_layout=True)
-        any_line = False
-        plotted_keys: list[str] = []
-        # Assign one unique color per loss key (shared between train/test variants).
-        # tab20 avoids early repeats for our current key count.
-        cmap = matplotlib.colormaps.get_cmap("tab20")
-        key_to_color = {k: cmap(i / max(len(keys), 1)) for i, k in enumerate(keys)}
-
-        for k in keys:
-            tr = train_history.get(k)
-            te = test_history.get(k)
-            if tr is not None and len(tr) > 0:
-                n = min(len(epochs), len(tr))
-                tr_y = np.asarray(tr[:n], dtype=float)
-                if use_log_y:
-                    tr_y = np.maximum(tr_y, 1e-8)
-                ax.plot(epochs[:n], tr_y, color=key_to_color[k], linestyle="-", label=f"train/{k}")
-                any_line = True
-                if k not in plotted_keys:
-                    plotted_keys.append(k)
-            if te is not None and len(te) > 0:
-                n = min(len(epochs), len(te))
-                te_y = np.asarray(te[:n], dtype=float)
-                if use_log_y:
-                    te_y = np.maximum(te_y, 1e-8)
-                ax.plot(epochs[:n], te_y, color=key_to_color[k], linestyle="--", label=f"test/{k}")
-                any_line = True
-                if k not in plotted_keys:
-                    plotted_keys.append(k)
-        top1 = test_history.get("top1_acc")
-        if top1 is not None and len(top1) > 0:
-            n = min(len(epochs), len(top1))
-            ax2 = ax.twinx()
-            ax2.plot(epochs[:n], top1[:n], color="black", linewidth=2.0, linestyle="--", label="test/top1_acc(%)")
-            ax2.set_ylabel("top1 acc (%)")
-            ax2.set_ylim(0.0, 40.0)
-            h2, l2 = ax2.get_legend_handles_labels()
-        else:
-            ax2 = None
-            h2, l2 = [], []
-        ax.set_title(title)
-        ax.set_xlabel("epoch")
-        ax.set_ylabel("loss")
-        if use_log_y:
-            ax.set_yscale("log")
-        ax.grid(True, alpha=0.3)
-        if any_line:
-            # Build legend as rows of [train/key, test/key] so column 1 is all train
-            # and column 2 is all test.
-            handles, labels = ax.get_legend_handles_labels()
-            handle_map = {lab: h for h, lab in zip(handles, labels)}
-            ordered_handles = []
-            ordered_labels = []
-            for k in plotted_keys:
-                tr_lab = f"train/{k}"
-                te_lab = f"test/{k}"
-                if tr_lab in handle_map:
-                    ordered_handles.append(handle_map[tr_lab])
-                    ordered_labels.append(tr_lab)
-                else:
-                    ordered_handles.append(plt.Line2D([], [], color=key_to_color[k], linestyle="-", alpha=0.0))
-                    ordered_labels.append("")
-                if te_lab in handle_map:
-                    ordered_handles.append(handle_map[te_lab])
-                    ordered_labels.append(te_lab)
-                else:
-                    ordered_handles.append(plt.Line2D([], [], color=key_to_color[k], linestyle="--", alpha=0.0))
-                    ordered_labels.append("")
-            combined_handles = ordered_handles + h2
-            combined_labels = ordered_labels + l2
-            ax.legend(combined_handles, combined_labels, fontsize=8, loc="best", ncol=2)
-        else:
-            ax.text(0.5, 0.5, "No matching loss keys found", ha="center", va="center")
-        out_path = os.path.join(out_dir, filename)
-        fig.savefig(out_path, dpi=200)
-        plt.close(fig)
-        return out_path
-
-    os.makedirs(out_dir, exist_ok=True)
-    return {
-        "raw": _plot(raw_keys, "Loss evolution (raw components)", "loss_components_raw.png"),
-        "scaled": _plot(scaled_keys, "Loss evolution (scaled components)", "loss_components_scaled.png"),
-        "raw_log": _plot(raw_keys, "Loss evolution (raw components, log-y)", "loss_components_raw_log.png", use_log_y=True),
-        "scaled_log": _plot(scaled_keys, "Loss evolution (scaled components, log-y)", "loss_components_scaled_log.png", use_log_y=True),
-    }
 
 # Set the random seed. If not provided, generate a new one based on the current time.
 def seed_everything(seed: int = None):
@@ -223,30 +116,27 @@ if __name__ == '__main__':
 
     # ── iVAE arguments ──
     parser.add_argument('--ivae', action='store_true', help='enable iVAE bottleneck between EEG encoder and contrastive loss')
-    parser.add_argument('--z_s_dim', type=int, default=32, help='subject latent block dimension')
-    parser.add_argument('--z_i_dim', type=int, default=128, help='image latent block dimension')
+    parser.add_argument('--z_s_dim', type=int, default=16, help='subject-only latent block dimension')
+    parser.add_argument('--z_is_dim', type=int, default=16, help='image+subject latent block dimension')
+    parser.add_argument('--z_i_dim', type=int, default=128, help='image-only latent block dimension')
+    parser.add_argument('--z_n_dim', type=int, default=16, help='noise latent block dimension')
     parser.add_argument('--beta_s', type=float, default=1.0, help='beta weight for subject KL')
+    parser.add_argument('--beta_is', type=float, default=1.0, help='beta weight for image+subject KL')
     parser.add_argument('--beta_i', type=float, default=1.0, help='beta weight for image KL')
+    parser.add_argument('--beta_n', type=float, default=1.0, help='beta weight for noise KL')
     parser.add_argument('--lambda_recon', type=float, default=1.0, help='weight applied to reconstruction loss term')
     parser.add_argument('--gamma_cl', type=float, default=1.0, help='contrastive loss weight in subject-conditioned VAE total loss')
-    parser.add_argument('--lambda_subj_zs', type=float, default=1.0, help='weight of subject CE head on z_s')
-    parser.add_argument('--lambda_subj_zi_adv', type=float, default=1.0, help='weight of adversarial subject CE head on z_i')
-    parser.add_argument('--grl_lambda', type=float, default=1.0, help='gradient reversal strength for z_i subject adversary')
+    parser.add_argument('--lambda_subj_cls', type=float, default=1.0, help='weight of subject CE head on concat(z_s, z_is)')
+    parser.add_argument('--lambda_subj_adv', type=float, default=1.0, help='weight of adversarial subject CE head on concat(z_i, z_n)')
+    parser.add_argument('--grl_lambda', type=float, default=1.0, help='gradient reversal strength for subject adversary')
     parser.add_argument('--C_max', type=float, default=25.0, help='maximum KL capacity for beta-VAE ramping')
     parser.add_argument('--C_stop_iter', type=int, default=10000, help='number of global steps to ramp capacity from 0 to C_max')
     parser.add_argument('--ivae_hidden_dim', type=int, default=512, help='hidden layer width for subject-conditioned VAE MLPs')
     parser.add_argument('--ivae_n_layers', type=int, default=1, help='number of extra hidden layers in iVAE MLPs')
     parser.add_argument('--n_subjects', type=int, default=11, help='embedding table size (must be > max subject ID)')
-    parser.add_argument('--retrieval_feature', type=str, choices=['z_i', 'full_z'], default='z_i', help='which latent(s) to use for retrieval at eval time')
-    # Enabled by default for inter-subject iVAE; use --no-* flags to disable explicitly.
-    parser.add_argument('--posterior_cond_on_subject', dest='posterior_cond_on_subject', action='store_true', help='condition z_s posterior on subject signature u: q(z_s|x,u)')
-    parser.add_argument('--no_posterior_cond_on_subject', dest='posterior_cond_on_subject', action='store_false', help='disable conditioning z_s posterior on subject signature u')
-    parser.add_argument('--image_prior_cond_on_image', dest='image_prior_cond_on_image', action='store_true', help='condition z_i prior on image embedding: p(z_i|img_feat)')
-    parser.add_argument('--no_image_prior_cond_on_image', dest='image_prior_cond_on_image', action='store_false', help='disable conditioning z_i prior on image embedding')
-    parser.set_defaults(
-        posterior_cond_on_subject=True,
-        image_prior_cond_on_image=True,
-    )
+    parser.add_argument('--cl_cond_on_subject', dest='cl_cond_on_subject', action='store_true', help='condition contrastive embedding on subject signature u by concatenation')
+    parser.add_argument('--no_cl_cond_on_subject', dest='cl_cond_on_subject', action='store_false', help='disable subject-signature concatenation for contrastive embedding')
+    parser.set_defaults(cl_cond_on_subject=True)
     parser.add_argument('--image_prior_hidden_dim', type=int, default=128, help='hidden width for image prior MLP')
     parser.add_argument('--image_prior_n_layers', type=int, default=1, help='number of extra hidden layers in image prior MLP')
 
@@ -257,6 +147,11 @@ if __name__ == '__main__':
     parser.add_argument('--warmup_steps', type=int, default=500, help='number of warmup steps (batches)')
     parser.add_argument('--warmup_factor', type=float, default=1.0/3, help='starting LR factor during warmup')
     parser.add_argument('--warmup_method', type=str, choices=['constant', 'linear'], default='linear', help='warmup strategy')
+
+    # ── W&B arguments ──
+    parser.add_argument('--wandb', action='store_true', help='enable Weights & Biases logging')
+    parser.add_argument('--wandb_project', type=str, default='Neurobridge_VAE', help='W&B project name')
+    parser.add_argument('--wandb_collection', type=str, default='runs', help='W&B registry collection name for artifact linking')
 
     args = parser.parse_args()
     
@@ -279,11 +174,26 @@ if __name__ == '__main__':
                     print(f"Removed incomplete experiment directory '{existing_dir}' to avoid conflicts.")
 
     writer = SummaryWriter(log_dir=log_dir)
-    
+
     # Save the configuration to a JSON file
     args_dict = vars(args)
     with open(os.path.join(writer.log_dir, "train_config.json"), 'w') as f:
         json.dump(args_dict, f, indent=4)
+
+    # W&B initialisation (optional)
+    wandb_run = None
+    if args.wandb:
+        try:
+            import wandb as _wandb
+            run_name = os.path.basename(writer.log_dir)
+            wandb_run = _wandb.init(
+                project=args.wandb_project,
+                name=run_name,
+                config=args_dict,
+                dir=writer.log_dir,
+            )
+        except Exception as _e:
+            print(f"[WARN] W&B initialisation failed: {_e}")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -455,47 +365,58 @@ if __name__ == '__main__':
 
     # ── Subject-conditioned VAE bottleneck (optional via --ivae) ──
     ivae_model = None
-    subj_cls_zs = None
-    subj_cls_zi_adv = None
-    subj_probe_zs = None
-    subj_probe_optimizer = None
+    subj_cls = None
+    subj_adv = None
+    subj_probe_heads: dict[str, nn.Module] = {}
+    subj_probe_optimizers: dict[str, optim.Optimizer] = {}
+    subj_probe_history: dict[str, dict[str, list[float]]] = {
+        "z_s": {"train_acc": [], "train_loss": [], "val_acc": []},
+        "z_is": {"train_acc": [], "train_loss": [], "val_acc": []},
+        "z_i": {"train_acc": [], "train_loss": [], "val_acc": []},
+        "z_n": {"train_acc": [], "train_loss": [], "val_acc": []},
+    }
     if args.ivae:
         ivae_model = EEGSubjectCondVAE(
             feature_dim=feature_dim,
-            z_i_dim=args.z_i_dim,
             z_s_dim=args.z_s_dim,
+            z_is_dim=args.z_is_dim,
+            z_i_dim=args.z_i_dim,
+            z_n_dim=args.z_n_dim,
             u_dim=5,
             hidden_dim=args.ivae_hidden_dim,
             n_layers=args.ivae_n_layers,
-            posterior_cond_on_subject=args.posterior_cond_on_subject,
-            image_prior_cond_on_image=args.image_prior_cond_on_image,
             img_dim=feature_dim,
             image_prior_hidden_dim=args.image_prior_hidden_dim,
             image_prior_n_layers=args.image_prior_n_layers,
         ).to(device)
         num_subject_classes = args.n_subjects - 1  # subject IDs are 1..10 in Things-EEG runs
-        subj_cls_zs = SubjectClassifier(args.z_s_dim, num_subject_classes).to(device)
-        subj_cls_zi_adv = SubjectClassifier(args.z_i_dim, num_subject_classes).to(device)
+        subj_cls = SubjectClassifier(args.z_s_dim + args.z_is_dim, num_subject_classes).to(device)
+        subj_adv = SubjectClassifier(args.z_i_dim + args.z_n_dim, num_subject_classes).to(device)
 
         ivae_params = sum(p.numel() for p in ivae_model.parameters() if p.requires_grad)
-        zs_head_params = sum(p.numel() for p in subj_cls_zs.parameters() if p.requires_grad)
-        zi_head_params = sum(p.numel() for p in subj_cls_zi_adv.parameters() if p.requires_grad)
+        zs_head_params = sum(p.numel() for p in subj_cls.parameters() if p.requires_grad)
+        zi_head_params = sum(p.numel() for p in subj_adv.parameters() if p.requires_grad)
         log(f'Subject-conditioned VAE trainable parameters: {ivae_params / 1e6:.2f}M')
-        log(f'Subject head(z_s) trainable parameters: {zs_head_params / 1e6:.2f}M')
-        log(f'Subject adversary(z_i) trainable parameters: {zi_head_params / 1e6:.2f}M')
+        log(f'Subject head(z_s,z_is) trainable parameters: {zs_head_params / 1e6:.2f}M')
+        log(f'Subject adversary(z_i,z_n) trainable parameters: {zi_head_params / 1e6:.2f}M')
         log(str(ivae_model))
 
         if args.subject_probe_holdout:
-            # Linear probe trained on detached z_s samples; never backpropagates into iVAE.
-            subj_probe_zs = nn.Linear(args.z_s_dim, num_subject_classes).to(device)
-            subj_probe_optimizer = optim.Adam(subj_probe_zs.parameters(), lr=1e-3)
+            # Linear probes trained on detached per-block samples; never backpropagates into iVAE.
+            subj_probe_heads = {
+                "z_s": nn.Linear(args.z_s_dim, num_subject_classes).to(device),
+                "z_is": nn.Linear(args.z_is_dim, num_subject_classes).to(device),
+                "z_i": nn.Linear(args.z_i_dim, num_subject_classes).to(device),
+                "z_n": nn.Linear(args.z_n_dim, num_subject_classes).to(device),
+            }
+            subj_probe_optimizers = {
+                latent: optim.Adam(head.parameters(), lr=1e-3)
+                for latent, head in subj_probe_heads.items()
+            }
 
     # Determine eeg projector input dim (depends on iVAE mode)
     if args.ivae:
-        if args.retrieval_feature == 'z_i':
-            eeg_proj_input_dim = args.z_i_dim
-        else:  # full_z
-            eeg_proj_input_dim = args.z_s_dim + args.z_i_dim
+        eeg_proj_input_dim = args.z_is_dim + args.z_i_dim + (5 if args.cl_cond_on_subject else 0)
     else:
         eeg_proj_input_dim = feature_dim
 
@@ -528,8 +449,8 @@ if __name__ == '__main__':
     trainable_parameters = list(model.parameters()) + list(eeg_projector.parameters()) + list(img_projector.parameters()) + list(text_projector.parameters())
     if args.ivae and ivae_model is not None:
         trainable_parameters.extend(list(ivae_model.parameters()))
-        trainable_parameters.extend(list(subj_cls_zs.parameters()))
-        trainable_parameters.extend(list(subj_cls_zi_adv.parameters()))
+        trainable_parameters.extend(list(subj_cls.parameters()))
+        trainable_parameters.extend(list(subj_adv.parameters()))
     if args.t_learnable:  # Only add criterion parameters if temperature is learnable
         trainable_parameters.extend([p for p in criterion.parameters() if p.requires_grad])
     
@@ -556,8 +477,8 @@ if __name__ == '__main__':
     text_projector.train()
     if ivae_model is not None:
         ivae_model.train()
-        subj_cls_zs.train()
-        subj_cls_zi_adv.train()
+        subj_cls.train()
+        subj_adv.train()
     best_top1_acc = 0.0
     best_top5_acc = 0.0
     best_test_loss = float('inf')
@@ -572,8 +493,8 @@ if __name__ == '__main__':
         model.train()
         if ivae_model is not None:
             ivae_model.train()
-            subj_cls_zs.train()
-            subj_cls_zi_adv.train()
+            subj_cls.train()
+            subj_adv.train()
         total_loss = 0.0
         train_comp_sums = init_component_sums()
         train_comp_count = 0
@@ -597,17 +518,16 @@ if __name__ == '__main__':
                 ivae_out = ivae_model(
                     eeg_feature_batch,
                     u_batch,
-                    img_feat=image_feature_batch if args.image_prior_cond_on_image else None,
+                    img_feat=image_feature_batch,
                     global_step=global_step,
                     C_max=args.C_max,
                     C_stop_iter=args.C_stop_iter,
                 )
 
-                # Select latent for contrastive alignment
-                if args.retrieval_feature == 'z_i':
-                    z_for_cl = ivae_out['z_i']
-                else:
-                    z_for_cl = ivae_out['z']
+                # Contrastive latents: image-conditioned blocks (z_is, z_i), optional subject signature.
+                z_for_cl = torch.cat([ivae_out['z_is'], ivae_out['z_i']], dim=-1)
+                if args.cl_cond_on_subject:
+                    z_for_cl = torch.cat([z_for_cl, u_batch], dim=-1)
 
                 # Project latents and image features for contrastive loss
                 eeg_proj = eeg_projector(z_for_cl)
@@ -623,7 +543,9 @@ if __name__ == '__main__':
                 loss, loss_components = scvae_loss(
                     ivae_out, eeg_feature_batch.detach(),
                     beta_s=args.beta_s,
+                    beta_is=args.beta_is,
                     beta_i=args.beta_i,
+                    beta_n=args.beta_n,
                     lambda_recon=args.lambda_recon,
                     lambda_cl=args.gamma_cl,
                     contrastive_loss_val=cl_loss,
@@ -632,21 +554,21 @@ if __name__ == '__main__':
                 if not args.subject_probe_holdout:
                     # Default behavior: subject heads contribute gradients to iVAE.
                     subj_labels = (subject_id_batch - 1).clamp(min=0, max=args.n_subjects - 2)
-                    subj_logits_zs = subj_cls_zs(ivae_out['z_s'])
-                    subj_logits_zi_adv = subj_cls_zi_adv(
-                        grad_reverse(ivae_out['z_i'], lambda_grl=args.grl_lambda)
+                    subj_logits_cls = subj_cls(torch.cat([ivae_out['z_s'], ivae_out['z_is']], dim=-1))
+                    subj_logits_adv = subj_adv(
+                        grad_reverse(torch.cat([ivae_out['z_i'], ivae_out['z_n']], dim=-1), lambda_grl=args.grl_lambda)
                     )
-                    loss_subj_zs = F.cross_entropy(subj_logits_zs, subj_labels)
-                    loss_subj_zi_adv = F.cross_entropy(subj_logits_zi_adv, subj_labels)
-                    loss = loss + args.lambda_subj_zs * loss_subj_zs + args.lambda_subj_zi_adv * loss_subj_zi_adv
-                    pred_zs = torch.argmax(subj_logits_zs, dim=1)
-                    pred_zi = torch.argmax(subj_logits_zi_adv, dim=1)
-                    loss_components["subj_ce_zs"] = loss_subj_zs.detach()
-                    loss_components["subj_ce_zs_weighted"] = (args.lambda_subj_zs * loss_subj_zs).detach()
-                    loss_components["subj_acc_zs"] = (pred_zs == subj_labels).float().mean().detach()
-                    loss_components["subj_ce_zi_adv"] = loss_subj_zi_adv.detach()
-                    loss_components["subj_ce_zi_adv_weighted"] = (args.lambda_subj_zi_adv * loss_subj_zi_adv).detach()
-                    loss_components["subj_acc_zi_adv"] = (pred_zi == subj_labels).float().mean().detach()
+                    loss_subj_cls = F.cross_entropy(subj_logits_cls, subj_labels)
+                    loss_subj_adv = F.cross_entropy(subj_logits_adv, subj_labels)
+                    loss = loss + args.lambda_subj_cls * loss_subj_cls + args.lambda_subj_adv * loss_subj_adv
+                    pred_cls = torch.argmax(subj_logits_cls, dim=1)
+                    pred_adv = torch.argmax(subj_logits_adv, dim=1)
+                    loss_components["subj_ce_cls"] = loss_subj_cls.detach()
+                    loss_components["subj_ce_cls_weighted"] = (args.lambda_subj_cls * loss_subj_cls).detach()
+                    loss_components["subj_acc_cls"] = (pred_cls == subj_labels).float().mean().detach()
+                    loss_components["subj_ce_adv"] = loss_subj_adv.detach()
+                    loss_components["subj_ce_adv_weighted"] = (args.lambda_subj_adv * loss_subj_adv).detach()
+                    loss_components["subj_acc_adv"] = (pred_adv == subj_labels).float().mean().detach()
 
                 loss_components["total"] = loss.detach()
                 global_step += 1
@@ -678,6 +600,11 @@ if __name__ == '__main__':
         avg_train_comp = average_components(train_comp_sums, train_comp_count)
         write_component_scalars(writer, 'train', avg_train_comp, epoch)
         append_loss_history(train_loss_history, avg_train_comp)
+        if wandb_run is not None:
+            wandb_run.log(
+                {"epoch": epoch, **{f"train/{k}": v for k, v in avg_train_comp.items()}},
+                step=epoch,
+            )
         train_epoch_line = f"Epoch [{epoch}/{args.num_epochs}] Train Loss: {avg_loss:.4f}"
         log(train_epoch_line, colorize(train_epoch_line, ansi["train"]))
         train_breakdown_plain = format_loss_breakdown("[Train]", avg_train_comp, args.ivae and ivae_model is not None)
@@ -694,16 +621,17 @@ if __name__ == '__main__':
             args.subject_probe_holdout
             and args.ivae
             and ivae_model is not None
-            and subj_probe_zs is not None
-            and subj_probe_optimizer is not None
+            and len(subj_probe_heads) > 0
+            and len(subj_probe_optimizers) > 0
             and subj_probe_train_dataloader is not None
             and subj_probe_val_dataloader is not None
         ):
             model.eval()
             ivae_model.eval()
-            subj_probe_zs.train()
-            probe_train_acc_sum = 0.0
-            probe_train_loss_sum = 0.0
+            for probe_head in subj_probe_heads.values():
+                probe_head.train()
+            probe_train_acc_sum = {k: 0.0 for k in subj_probe_heads}
+            probe_train_loss_sum = {k: 0.0 for k in subj_probe_heads}
             probe_train_batches = 0
             for probe_batch in subj_probe_train_dataloader:
                 eeg_probe = probe_batch[0].to(device)
@@ -718,26 +646,37 @@ if __name__ == '__main__':
                     ivae_probe_out = ivae_model(
                         eeg_probe_feature,
                         u_probe,
-                        img_feat=image_probe if args.image_prior_cond_on_image else None,
+                        img_feat=image_probe,
                         global_step=global_step,
                         C_max=args.C_max,
                         C_stop_iter=args.C_stop_iter,
                     )
                     q_s_mu_probe, q_s_lv_probe = ivae_probe_out['posterior_params']['s']
-                    z_s_probe = q_s_mu_probe + torch.randn_like(q_s_mu_probe) * torch.exp(0.5 * q_s_lv_probe)
+                    q_is_mu_probe, q_is_lv_probe = ivae_probe_out['posterior_params']['is']
+                    q_i_mu_probe, q_i_lv_probe = ivae_probe_out['posterior_params']['i']
+                    q_n_mu_probe, q_n_lv_probe = ivae_probe_out['posterior_params']['n']
+                    probe_latents = {
+                        "z_s": q_s_mu_probe + torch.randn_like(q_s_mu_probe) * torch.exp(0.5 * q_s_lv_probe),
+                        "z_is": q_is_mu_probe + torch.randn_like(q_is_mu_probe) * torch.exp(0.5 * q_is_lv_probe),
+                        "z_i": q_i_mu_probe + torch.randn_like(q_i_mu_probe) * torch.exp(0.5 * q_i_lv_probe),
+                        "z_n": q_n_mu_probe + torch.randn_like(q_n_mu_probe) * torch.exp(0.5 * q_n_lv_probe),
+                    }
                 probe_labels = (subject_id_probe - 1).clamp(min=0, max=args.n_subjects - 2)
-                subj_probe_optimizer.zero_grad()
-                probe_logits = subj_probe_zs(z_s_probe.detach())
-                probe_loss = F.cross_entropy(probe_logits, probe_labels)
-                probe_loss.backward()
-                subj_probe_optimizer.step()
-                probe_pred = torch.argmax(probe_logits, dim=1)
-                probe_train_acc_sum += float((probe_pred == probe_labels).float().mean().item())
-                probe_train_loss_sum += float(probe_loss.item())
+                for latent_name, probe_head in subj_probe_heads.items():
+                    probe_optimizer = subj_probe_optimizers[latent_name]
+                    probe_optimizer.zero_grad()
+                    probe_logits = probe_head(probe_latents[latent_name].detach())
+                    probe_loss = F.cross_entropy(probe_logits, probe_labels)
+                    probe_loss.backward()
+                    probe_optimizer.step()
+                    probe_pred = torch.argmax(probe_logits, dim=1)
+                    probe_train_acc_sum[latent_name] += float((probe_pred == probe_labels).float().mean().item())
+                    probe_train_loss_sum[latent_name] += float(probe_loss.item())
                 probe_train_batches += 1
 
-            subj_probe_zs.eval()
-            probe_val_acc_sum = 0.0
+            for probe_head in subj_probe_heads.values():
+                probe_head.eval()
+            probe_val_acc_sum = {k: 0.0 for k in subj_probe_heads}
             probe_val_batches = 0
             with torch.no_grad():
                 for probe_val_batch in subj_probe_val_dataloader:
@@ -753,40 +692,55 @@ if __name__ == '__main__':
                     ivae_probe_val_out = ivae_model(
                         eeg_probe_val_feature,
                         u_probe_val,
-                        img_feat=image_probe_val if args.image_prior_cond_on_image else None,
+                        img_feat=image_probe_val,
                         global_step=global_step,
                         C_max=args.C_max,
                         C_stop_iter=args.C_stop_iter,
                     )
                     q_s_mu_probe_val, q_s_lv_probe_val = ivae_probe_val_out['posterior_params']['s']
-                    z_s_probe_val = q_s_mu_probe_val + torch.randn_like(q_s_mu_probe_val) * torch.exp(0.5 * q_s_lv_probe_val)
+                    q_is_mu_probe_val, q_is_lv_probe_val = ivae_probe_val_out['posterior_params']['is']
+                    q_i_mu_probe_val, q_i_lv_probe_val = ivae_probe_val_out['posterior_params']['i']
+                    q_n_mu_probe_val, q_n_lv_probe_val = ivae_probe_val_out['posterior_params']['n']
+                    probe_latents_val = {
+                        "z_s": q_s_mu_probe_val + torch.randn_like(q_s_mu_probe_val) * torch.exp(0.5 * q_s_lv_probe_val),
+                        "z_is": q_is_mu_probe_val + torch.randn_like(q_is_mu_probe_val) * torch.exp(0.5 * q_is_lv_probe_val),
+                        "z_i": q_i_mu_probe_val + torch.randn_like(q_i_mu_probe_val) * torch.exp(0.5 * q_i_lv_probe_val),
+                        "z_n": q_n_mu_probe_val + torch.randn_like(q_n_mu_probe_val) * torch.exp(0.5 * q_n_lv_probe_val),
+                    }
                     probe_val_labels = (subject_id_probe_val - 1).clamp(min=0, max=args.n_subjects - 2)
-                    probe_val_logits = subj_probe_zs(z_s_probe_val)
-                    probe_val_pred = torch.argmax(probe_val_logits, dim=1)
-                    probe_val_acc_sum += float((probe_val_pred == probe_val_labels).float().mean().item())
+                    for latent_name, probe_head in subj_probe_heads.items():
+                        probe_val_logits = probe_head(probe_latents_val[latent_name])
+                        probe_val_pred = torch.argmax(probe_val_logits, dim=1)
+                        probe_val_acc_sum[latent_name] += float((probe_val_pred == probe_val_labels).float().mean().item())
                     probe_val_batches += 1
 
             if probe_train_batches > 0 and probe_val_batches > 0:
-                probe_train_acc = probe_train_acc_sum / probe_train_batches
-                probe_train_loss = probe_train_loss_sum / probe_train_batches
-                probe_val_acc = probe_val_acc_sum / probe_val_batches
-                writer.add_scalar('SubjectProbe/zs_train_acc', probe_train_acc, epoch)
-                writer.add_scalar('SubjectProbe/zs_train_loss', probe_train_loss, epoch)
-                writer.add_scalar('SubjectProbe/zs_val_acc', probe_val_acc, epoch)
-                probe_line_plain = (
-                    f"SubjProbe[z_s] TrainAcc={probe_train_acc:.3f} ValAcc={probe_val_acc:.3f} "
-                    f"TrainCE={probe_train_loss:.3f}"
-                )
-                if use_terminal_color:
-                    probe_line_color = (
-                        f"{colorize('SubjProbe[z_s]', ansi['test'])} "
-                        f"{colorize(f'TrainAcc={probe_train_acc:.3f}', ansi['metric'])} "
-                        f"{colorize(f'ValAcc={probe_val_acc:.3f}', ansi['red'])} "
-                        f"{colorize(f'TrainCE={probe_train_loss:.3f}', ansi['metric'])}"
+                probe_line_parts = []
+                probe_wandb_dict = {"epoch": epoch}
+                for latent_name in ("z_s", "z_is", "z_i", "z_n"):
+                    probe_train_acc = probe_train_acc_sum[latent_name] / probe_train_batches
+                    probe_train_loss = probe_train_loss_sum[latent_name] / probe_train_batches
+                    probe_val_acc = probe_val_acc_sum[latent_name] / probe_val_batches
+                    subj_probe_history[latent_name]["train_acc"].append(float(probe_train_acc))
+                    subj_probe_history[latent_name]["train_loss"].append(float(probe_train_loss))
+                    subj_probe_history[latent_name]["val_acc"].append(float(probe_val_acc))
+                    writer.add_scalar(f'SubjectProbe/{latent_name}_train_acc', probe_train_acc, epoch)
+                    writer.add_scalar(f'SubjectProbe/{latent_name}_train_loss', probe_train_loss, epoch)
+                    writer.add_scalar(f'SubjectProbe/{latent_name}_val_acc', probe_val_acc, epoch)
+                    probe_wandb_dict[f"subject_probe/{latent_name}_train_acc"] = probe_train_acc
+                    probe_wandb_dict[f"subject_probe/{latent_name}_val_acc"] = probe_val_acc
+                    probe_wandb_dict[f"subject_probe/{latent_name}_train_loss"] = probe_train_loss
+                    probe_line_parts.append(
+                        f"{latent_name}:TrainAcc={probe_train_acc:.3f} ValAcc={probe_val_acc:.3f} CE={probe_train_loss:.3f}"
                     )
+                probe_line_plain = "SubjProbe " + " | ".join(probe_line_parts)
+                if use_terminal_color:
+                    probe_line_color = colorize(probe_line_plain, ansi["test"])
                 else:
                     probe_line_color = probe_line_plain
                 log(probe_line_plain, probe_line_color)
+                if wandb_run is not None:
+                    wandb_run.log(probe_wandb_dict, step=epoch)
 
         if args.save_weights:
             ckpt = {
@@ -799,8 +753,8 @@ if __name__ == '__main__':
             }
             if ivae_model is not None:
                 ckpt['ivae_model_state_dict'] = ivae_model.state_dict()
-                ckpt['subj_cls_zs_state_dict'] = subj_cls_zs.state_dict()
-                ckpt['subj_cls_zi_adv_state_dict'] = subj_cls_zi_adv.state_dict()
+                ckpt['subj_cls_state_dict'] = subj_cls.state_dict()
+                ckpt['subj_adv_state_dict'] = subj_adv.state_dict()
             torch.save(ckpt, f"{writer.log_dir}/checkpoint_last.pth")
 
         model.eval()
@@ -809,8 +763,8 @@ if __name__ == '__main__':
         text_projector.eval()
         if ivae_model is not None:
             ivae_model.eval()
-            subj_cls_zs.eval()
-            subj_cls_zi_adv.eval()
+            subj_cls.eval()
+            subj_adv.eval()
         total_test_loss = 0.0
         eeg_feature_list = []
         image_feature_list = []
@@ -837,16 +791,15 @@ if __name__ == '__main__':
                     ivae_out = ivae_model(
                         eeg_feature_batch,
                         u_batch,
-                        img_feat=image_feature_batch if args.image_prior_cond_on_image else None,
+                        img_feat=image_feature_batch,
                         global_step=global_step,
                         C_max=args.C_max,
                         C_stop_iter=args.C_stop_iter,
                     )
 
-                    if args.retrieval_feature == 'z_i':
-                        z_for_cl = ivae_out['z_i']
-                    else:
-                        z_for_cl = ivae_out['z']
+                    z_for_cl = torch.cat([ivae_out['z_is'], ivae_out['z_i']], dim=-1)
+                    if args.cl_cond_on_subject:
+                        z_for_cl = torch.cat([z_for_cl, u_batch], dim=-1)
 
                     eeg_proj = eeg_projector(z_for_cl)
                     img_proj = img_projector(image_feature_batch)
@@ -860,27 +813,29 @@ if __name__ == '__main__':
 
                     if args.subject_probe_holdout:
                         subj_labels = None
-                        subj_logits_zs = None
-                        subj_logits_zi_adv = None
+                        subj_logits_cls = None
+                        subj_logits_adv = None
                     else:
                         subj_labels = (subject_id_batch - 1).clamp(min=0, max=args.n_subjects - 2)
-                        subj_logits_zs = subj_cls_zs(ivae_out['z_s'])
-                        subj_logits_zi_adv = subj_cls_zi_adv(
-                            grad_reverse(ivae_out['z_i'], lambda_grl=args.grl_lambda)
+                        subj_logits_cls = subj_cls(torch.cat([ivae_out['z_s'], ivae_out['z_is']], dim=-1))
+                        subj_logits_adv = subj_adv(
+                            grad_reverse(torch.cat([ivae_out['z_i'], ivae_out['z_n']], dim=-1), lambda_grl=args.grl_lambda)
                         )
 
                     loss, test_loss_components = scvae_loss(
                         ivae_out, eeg_feature_batch,
                         beta_s=args.beta_s,
+                        beta_is=args.beta_is,
                         beta_i=args.beta_i,
+                        beta_n=args.beta_n,
                         lambda_recon=args.lambda_recon,
                         lambda_cl=args.gamma_cl,
                         contrastive_loss_val=cl_loss,
-                        subj_logits_zs=subj_logits_zs,
-                        subj_logits_zi_adv=subj_logits_zi_adv,
+                        subj_logits_cls=subj_logits_cls,
+                        subj_logits_adv=subj_logits_adv,
                         subj_labels=subj_labels,
-                        lambda_subj_zs=args.lambda_subj_zs,
-                        lambda_subj_zi_adv=args.lambda_subj_zi_adv,
+                        lambda_subj_cls=args.lambda_subj_cls,
+                        lambda_subj_adv=args.lambda_subj_adv,
                     )
 
                     eeg_feature_list.append(eeg_proj.cpu().numpy())
@@ -921,6 +876,16 @@ if __name__ == '__main__':
         top1_acc = top1_count / total * 100
         # Track retrieval quality alongside loss components for plotting.
         test_loss_history.setdefault("top1_acc", []).append(float(top1_acc))
+        if wandb_run is not None:
+            wandb_run.log(
+                {
+                    "epoch": epoch,
+                    **{f"test/{k}": v for k, v in avg_test_comp.items()},
+                    "test/top1_acc": top1_acc,
+                    "test/top5_acc": top5_acc,
+                },
+                step=epoch,
+            )
         test_line_plain = f"top5 acc {top5_acc:.2f}%\ttop1 acc {top1_acc:.2f}%\tTest Loss: {avg_test_loss:.4f}"
         if use_terminal_color:
             test_line_color = (
@@ -966,10 +931,12 @@ if __name__ == '__main__':
                 }
                 if ivae_model is not None:
                     best_ckpt['ivae_model_state_dict'] = ivae_model.state_dict()
-                    best_ckpt['subj_cls_zs_state_dict'] = subj_cls_zs.state_dict()
-                    best_ckpt['subj_cls_zi_adv_state_dict'] = subj_cls_zi_adv.state_dict()
+                    best_ckpt['subj_cls_state_dict'] = subj_cls.state_dict()
+                    best_ckpt['subj_adv_state_dict'] = subj_adv.state_dict()
                 torch.save(best_ckpt, f"{writer.log_dir}/checkpoint_test_best.pth")
 
+    loss_plot_paths: dict[str, str] = {}
+    subject_probe_plot_path = ""
     try:
         loss_plot_paths = save_loss_component_plots(
             train_history=train_loss_history,
@@ -981,8 +948,22 @@ if __name__ == '__main__':
         log(f"Saved loss plot (scaled): {loss_plot_paths.get('scaled', '')}")
         log(f"Saved loss plot (raw, log-y): {loss_plot_paths.get('raw_log', '')}")
         log(f"Saved loss plot (scaled, log-y): {loss_plot_paths.get('scaled_log', '')}")
+        for key in ("raw_html", "scaled_html", "raw_log_html", "scaled_log_html"):
+            if loss_plot_paths.get(key):
+                log(f"Saved interactive loss plot ({key}): {loss_plot_paths[key]}")
     except Exception as e:
         log(f"[WARN] Failed to save loss component plots: {e}")
+
+    if args.subject_probe_holdout:
+        try:
+            subject_probe_plot_path = save_subject_probe_plot(
+                probe_history=subj_probe_history,
+                epochs=loss_epochs,
+                out_dir=writer.log_dir,
+            )
+            log(f"Saved subject probe plot: {subject_probe_plot_path}")
+        except Exception as e:
+            log(f"[WARN] Failed to save subject probe plot: {e}")
 
     result_dict = {}
     result_dict['top1 acc'] = f'{top1_acc:.2f}'
@@ -994,10 +975,48 @@ if __name__ == '__main__':
     result_dict['best epoch'] = best_test_epoch
     df = pd.DataFrame(result_dict, index=[0])
     df.to_csv(os.path.join(log_dir, 'result.csv'), index=False)
-    
+
     log(
         f'best test contrastive loss: {best_test_cl:.4f} '
         f'(total test loss at selected epoch: {best_test_loss:.4f}) '
         f'top5 acc: {best_top5_acc:.2f} top1 acc: {best_top1_acc:.2f} '
         f'at epoch {best_test_epoch}'
     )
+
+    # W&B artifact: upload plots + config, then link to registry
+    if wandb_run is not None:
+        try:
+            import wandb as _wandb
+            run_name = os.path.basename(writer.log_dir)
+            artifact = _wandb.Artifact(
+                name=run_name,
+                type="run-artifacts",
+                description=f"Loss plots and config for run {run_name}",
+                metadata={
+                    "best_top1_acc": best_top1_acc,
+                    "best_top5_acc": best_top5_acc,
+                    "best_test_loss": best_test_loss,
+                    "best_epoch": best_test_epoch,
+                },
+            )
+            config_path = os.path.join(writer.log_dir, "train_config.json")
+            if os.path.exists(config_path):
+                artifact.add_file(config_path, name="train_config.json")
+            result_csv_path = os.path.join(log_dir, "result.csv")
+            if os.path.exists(result_csv_path):
+                artifact.add_file(result_csv_path, name="result.csv")
+            for key, path in loss_plot_paths.items():
+                if path and os.path.exists(path):
+                    artifact.add_file(path, name=os.path.basename(path))
+            if subject_probe_plot_path and os.path.exists(subject_probe_plot_path):
+                artifact.add_file(subject_probe_plot_path, name=os.path.basename(subject_probe_plot_path))
+            ckpt_path = os.path.join(writer.log_dir, "checkpoint_test_best.pth")
+            if os.path.exists(ckpt_path):
+                artifact.add_file(ckpt_path, name="checkpoint_test_best.pth")
+            wandb_run.log_artifact(artifact)
+            artifact.wait()
+            wandb_run.link_artifact(artifact, f"wandb-registry-Neurobridge_VAE/{args.wandb_collection}")
+            log(f"W&B artifact '{run_name}' linked to registry collection '{args.wandb_collection}'")
+            wandb_run.finish()
+        except Exception as _e:
+            log(f"[WARN] W&B artifact upload/linking failed: {_e}")

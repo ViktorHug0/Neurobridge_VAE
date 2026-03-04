@@ -41,20 +41,24 @@ BASE_SEED=2025
 # Fixed model settings
 # =========================
 Z_S_DIM=32
+Z_IS_DIM=16
 Z_I_DIM=512
+Z_N_DIM=16
 BETA_S=0.1
+BETA_IS=0.1
 BETA_I=0.0
+BETA_N=0.1
 LAMBDA_RECON=1.0
-LAMBDA_SUBJ_ZS=0.0
-LAMBDA_SUBJ_ZI_ADV=0.1
+LAMBDA_SUBJ_CLS=0.0
+LAMBDA_SUBJ_ADV=0.1
 GRL_LAMBDA=1.0
 C_MAX=5.0
 C_STOP_ITER=10000
 IVAE_HIDDEN_DIM=512
 IVAE_N_LAYERS=1
 N_SUBJECTS=11
-RETRIEVAL_FEATURE="z_i"
 GAMMA_CL=10.0
+CL_COND_ON_SUBJECT=true
 
 OUTPUT_DIR="./results/things_eeg/inter-subject-sweeps"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
@@ -84,6 +88,11 @@ for value in "${SWEEP_VALUES[@]}"; do
         echo ""
         echo ">>> Running ${SWEEP_PARAM}=${value} (repeat=${rep}, seed=${seed})"
 
+        CL_COND_FLAG="--no_cl_cond_on_subject"
+        if [ "${CL_COND_ON_SUBJECT}" = true ]; then
+            CL_COND_FLAG="--cl_cond_on_subject"
+        fi
+
         python train.py \
             --batch_size "${BATCH_SIZE}" \
             --learning_rate "${LEARNING_RATE}" \
@@ -107,19 +116,23 @@ for value in "${SWEEP_VALUES[@]}"; do
             --save_weights \
             --ivae \
             --z_s_dim "${Z_S_DIM}" \
+            --z_is_dim "${Z_IS_DIM}" \
             --z_i_dim "${Z_I_DIM}" \
+            --z_n_dim "${Z_N_DIM}" \
             --beta_s "${BETA_S}" \
+            --beta_is "${BETA_IS}" \
             --beta_i "${BETA_I}" \
+            --beta_n "${BETA_N}" \
             --lambda_recon "${LAMBDA_RECON}" \
-            --lambda_subj_zs "${LAMBDA_SUBJ_ZS}" \
-            --lambda_subj_zi_adv "${LAMBDA_SUBJ_ZI_ADV}" \
+            --lambda_subj_cls "${LAMBDA_SUBJ_CLS}" \
+            --lambda_subj_adv "${LAMBDA_SUBJ_ADV}" \
             --grl_lambda "${GRL_LAMBDA}" \
             --C_max "${C_MAX}" \
             --C_stop_iter "${C_STOP_ITER}" \
             --ivae_hidden_dim "${IVAE_HIDDEN_DIM}" \
             --ivae_n_layers "${IVAE_N_LAYERS}" \
             --n_subjects "${N_SUBJECTS}" \
-            --retrieval_feature "${RETRIEVAL_FEATURE}" \
+            ${CL_COND_FLAG} \
             --seed "${seed}" \
             --gamma_cl "${GAMMA_CL}" \
             --"${SWEEP_PARAM}" "${value}"
