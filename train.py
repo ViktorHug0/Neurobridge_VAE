@@ -540,8 +540,16 @@ if __name__ == '__main__':
                 else:
                     cl_loss = criterion(eeg_proj, img_proj, text_proj)
 
+                # Subject heads train on the main training split only; the 10% split is reserved for probe validation.
+                subj_labels = (subject_id_batch - 1).clamp(min=0, max=args.n_subjects - 2)
+                subj_logits_cls = subj_cls(torch.cat([ivae_out['z_s'], ivae_out['z_is']], dim=-1))
+                subj_logits_adv = subj_adv(
+                    grad_reverse(torch.cat([ivae_out['z_i'], ivae_out['z_n']], dim=-1), lambda_grl=args.grl_lambda)
+                )
+
                 loss, loss_components = scvae_loss(
-                    ivae_out, eeg_feature_batch.detach(),
+                    ivae_out,
+                    eeg_feature_batch.detach(),
                     beta_s=args.beta_s,
                     beta_is=args.beta_is,
                     beta_i=args.beta_i,
@@ -549,28 +557,13 @@ if __name__ == '__main__':
                     lambda_recon=args.lambda_recon,
                     lambda_cl=args.gamma_cl,
                     contrastive_loss_val=cl_loss,
+                    subj_logits_cls=subj_logits_cls,
+                    subj_logits_adv=subj_logits_adv,
+                    subj_labels=subj_labels,
+                    lambda_subj_cls=args.lambda_subj_cls,
+                    lambda_subj_adv=args.lambda_subj_adv,
                 )
 
-                if not args.subject_probe_holdout:
-                    # Default behavior: subject heads contribute gradients to iVAE.
-                    subj_labels = (subject_id_batch - 1).clamp(min=0, max=args.n_subjects - 2)
-                    subj_logits_cls = subj_cls(torch.cat([ivae_out['z_s'], ivae_out['z_is']], dim=-1))
-                    subj_logits_adv = subj_adv(
-                        grad_reverse(torch.cat([ivae_out['z_i'], ivae_out['z_n']], dim=-1), lambda_grl=args.grl_lambda)
-                    )
-                    loss_subj_cls = F.cross_entropy(subj_logits_cls, subj_labels)
-                    loss_subj_adv = F.cross_entropy(subj_logits_adv, subj_labels)
-                    loss = loss + args.lambda_subj_cls * loss_subj_cls + args.lambda_subj_adv * loss_subj_adv
-                    pred_cls = torch.argmax(subj_logits_cls, dim=1)
-                    pred_adv = torch.argmax(subj_logits_adv, dim=1)
-                    loss_components["subj_ce_cls"] = loss_subj_cls.detach()
-                    loss_components["subj_ce_cls_weighted"] = (args.lambda_subj_cls * loss_subj_cls).detach()
-                    loss_components["subj_acc_cls"] = (pred_cls == subj_labels).float().mean().detach()
-                    loss_components["subj_ce_adv"] = loss_subj_adv.detach()
-                    loss_components["subj_ce_adv_weighted"] = (args.lambda_subj_adv * loss_subj_adv).detach()
-                    loss_components["subj_acc_adv"] = (pred_adv == subj_labels).float().mean().detach()
-
-                loss_components["total"] = loss.detach()
                 global_step += 1
 
             # ── Standard (non-iVAE) path ──
@@ -811,16 +804,18 @@ if __name__ == '__main__':
                     else:
                         cl_loss = criterion(eeg_proj, img_proj, text_proj)
 
-                    if args.subject_probe_holdout:
-                        subj_labels = None
-                        subj_logits_cls = None
-                        subj_logits_adv = None
-                    else:
+                    # Evaluate subject heads only when this batch contains training subjects.
+                    # In inter-subject evaluation, test batches are unseen held-out subjects.
+                    if all(int(sid) in set(args.train_subject_ids) for sid in subject_id_batch.detach().cpu().tolist()):
                         subj_labels = (subject_id_batch - 1).clamp(min=0, max=args.n_subjects - 2)
                         subj_logits_cls = subj_cls(torch.cat([ivae_out['z_s'], ivae_out['z_is']], dim=-1))
                         subj_logits_adv = subj_adv(
                             grad_reverse(torch.cat([ivae_out['z_i'], ivae_out['z_n']], dim=-1), lambda_grl=args.grl_lambda)
                         )
+                    else:
+                        subj_labels = None
+                        subj_logits_cls = None
+                        subj_logits_adv = None
 
                     loss, test_loss_components = scvae_loss(
                         ivae_out, eeg_feature_batch,
