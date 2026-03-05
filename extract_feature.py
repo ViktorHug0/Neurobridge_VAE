@@ -55,6 +55,67 @@ def extract_open_clip(image, processor, model, augmentation, device):
     return feature
 
 
+def extract_open_clip_intermediate(
+    image,
+    processor,
+    model,
+    augmentation,
+    device,
+    layer_idx: int,
+    pool_type: str,
+):
+    if augmentation is not None:
+        image = augmentation(image)
+    image = processor(image).unsqueeze(0).to(device)  # shape: (1, 3, H, W)
+
+    if not hasattr(model.visual, "transformer") or not hasattr(model.visual.transformer, "resblocks"):
+        raise ValueError("Selected OpenCLIP backbone does not expose visual.transformer.resblocks.")
+    resblocks = model.visual.transformer.resblocks
+    if layer_idx < 0 or layer_idx >= len(resblocks):
+        raise ValueError(f"Invalid intermediate layer index {layer_idx}. Valid range: [0, {len(resblocks)-1}]")
+
+    layer_output = {}
+
+    def hook_fn(module, _input, output):
+        layer_output["hidden"] = output
+
+    hook = resblocks[layer_idx].register_forward_hook(hook_fn)
+    try:
+        with torch.no_grad():
+            _ = model.encode_image(image)
+    finally:
+        hook.remove()
+
+    if "hidden" not in layer_output:
+        raise RuntimeError("Forward hook did not capture intermediate output.")
+
+    hidden = layer_output["hidden"]
+    if hidden.ndim != 3:
+        raise ValueError(f"Expected 3D hidden states, got shape {tuple(hidden.shape)}")
+
+    # OpenCLIP ViT blocks commonly output [seq_len, batch, dim].
+    # Normalize to [batch, seq_len, dim] before pooling.
+    if hidden.shape[0] == image.shape[0]:
+        tokens = hidden
+    elif hidden.shape[1] == image.shape[0]:
+        tokens = hidden.permute(1, 0, 2).contiguous()
+    else:
+        raise ValueError(
+            f"Cannot infer token layout for hidden shape {tuple(hidden.shape)} "
+            f"and batch size {image.shape[0]}"
+        )
+
+    if pool_type == "cls":
+        pooled = tokens[:, 0, :]
+    elif pool_type == "mean":
+        pooled = tokens[:, 1:, :].mean(dim=1) if tokens.shape[1] > 1 else tokens.mean(dim=1)
+    else:
+        raise ValueError(f"Unknown pool_type: {pool_type}")
+
+    feature = pooled.detach().cpu().numpy()  # shape: (1, D)
+    return feature
+
+
 def extract_dinov2(image:str, processor, model, device):
     inputs = processor(images=image, return_tensors="pt").to(device)
     with torch.no_grad():
@@ -64,7 +125,18 @@ def extract_dinov2(image:str, processor, model, device):
     return feature
 
 
-def extract_image_features(image_dir, num_images_per_object, processor, model, model_type, augmentation, device):
+def extract_image_features(
+    image_dir,
+    num_images_per_object,
+    processor,
+    model,
+    model_type,
+    augmentation,
+    device,
+    feature_source="final",
+    intermediate_layer=11,
+    intermediate_pool="cls",
+):
     image_classes = sorted(os.listdir(image_dir))
     image_list = []
     for image_class in image_classes:
@@ -81,7 +153,18 @@ def extract_image_features(image_dir, num_images_per_object, processor, model, m
         if model_type == 'clip':
             feature = extract_clip(image, processor, model, device)
         elif model_type == 'open_clip':
-            feature = extract_open_clip(image, processor, model, augmentation, device)
+            if feature_source == "intermediate":
+                feature = extract_open_clip_intermediate(
+                    image,
+                    processor,
+                    model,
+                    augmentation,
+                    device,
+                    layer_idx=intermediate_layer,
+                    pool_type=intermediate_pool,
+                )
+            else:
+                feature = extract_open_clip(image, processor, model, augmentation, device)
         elif model_type == 'dinov2':
             feature = extract_dinov2(image, processor, model, device)
         all_features.append(feature)
@@ -129,6 +212,9 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="./data/things_eeg/image_feature/RN50")
     parser.add_argument("--aug_type", type=str, default="None", choices=["GaussianBlur", "GaussianNoise", "Mosaic", "RandomCrop", "LowResolution", "ColorJitter", "GrayScale", "None"])
     parser.add_argument("--num_images_per_object", type=int, default=10)
+    parser.add_argument("--feature_source", type=str, choices=["final", "intermediate"], default="final")
+    parser.add_argument("--intermediate_layer", type=int, default=11, help="0-indexed block index for OpenCLIP ViT intermediate extraction")
+    parser.add_argument("--intermediate_pool", type=str, choices=["cls", "mean"], default="cls", help="Pooling over intermediate tokens")
     args = parser.parse_args()
     
     print('Input arguments:')
@@ -152,6 +238,9 @@ if __name__ == "__main__":
         processor = AutoImageProcessor.from_pretrained("facebook/dinov2-giant")
         model = AutoModel.from_pretrained("facebook/dinov2-giant").to(device)
     model.eval()
+
+    if args.feature_source == "intermediate" and args.model_type != "open_clip":
+        raise ValueError("--feature_source intermediate is currently only supported for --model_type open_clip")
     
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
@@ -179,26 +268,70 @@ if __name__ == "__main__":
     test_dir = resolve_split_dir(args.image_set_dir, "test")
     
     if augmentation is None:
-        train_image_features = extract_image_features(train_dir, args.num_images_per_object, processor, model, args.model_type, augmentation, device)
+        train_image_features = extract_image_features(
+            train_dir,
+            args.num_images_per_object,
+            processor,
+            model,
+            args.model_type,
+            augmentation,
+            device,
+            feature_source=args.feature_source,
+            intermediate_layer=args.intermediate_layer,
+            intermediate_pool=args.intermediate_pool,
+        )
         print(f"Train image feature shape: {train_image_features.shape}")
         np.save(os.path.join(args.output_dir, "image_train.npy"), train_image_features)
     else:
         train_image_features_list = []
         for i in range(args.repeat_times):
-            train_image_features = extract_image_features(train_dir, args.num_images_per_object, processor, model, args.model_type, augmentation, device)
+            train_image_features = extract_image_features(
+                train_dir,
+                args.num_images_per_object,
+                processor,
+                model,
+                args.model_type,
+                augmentation,
+                device,
+                feature_source=args.feature_source,
+                intermediate_layer=args.intermediate_layer,
+                intermediate_pool=args.intermediate_pool,
+            )
             train_image_features_list.append(train_image_features)
         train_image_features = np.stack(train_image_features_list, axis=0)
         print(f"Train image feature shape: {train_image_features.shape}")
         np.save(os.path.join(args.output_dir, "train.npy"), train_image_features)
     
     if augmentation is None:
-        test_image_features = extract_image_features(test_dir, 1, processor, model, args.model_type, augmentation, device)
+        test_image_features = extract_image_features(
+            test_dir,
+            1,
+            processor,
+            model,
+            args.model_type,
+            augmentation,
+            device,
+            feature_source=args.feature_source,
+            intermediate_layer=args.intermediate_layer,
+            intermediate_pool=args.intermediate_pool,
+        )
         print(f"Test image feature shape: {test_image_features.shape}")
         np.save(os.path.join(args.output_dir, "image_test.npy"), test_image_features)
     else:
         test_image_features_list = []
         for i in range(args.repeat_times):
-            test_image_features = extract_image_features(test_dir, 1, processor, model, args.model_type, augmentation, device)
+            test_image_features = extract_image_features(
+                test_dir,
+                1,
+                processor,
+                model,
+                args.model_type,
+                augmentation,
+                device,
+                feature_source=args.feature_source,
+                intermediate_layer=args.intermediate_layer,
+                intermediate_pool=args.intermediate_pool,
+            )
             test_image_features_list.append(test_image_features)
         test_image_features = np.stack(test_image_features_list, axis=0)
         print(f"Test image feature shape: {test_image_features.shape}")
