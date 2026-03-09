@@ -116,6 +116,66 @@ def extract_open_clip_intermediate(
     return feature
 
 
+def extract_internvit_intermediate(
+    image,
+    processor,
+    model,
+    augmentation,
+    device,
+    layer_idx: int,
+    pool_type: str,
+):
+    if augmentation is not None:
+        image = augmentation(image)
+    
+    # InternViT usually takes images as tensors
+    inputs = processor(images=image, return_tensors="pt").to(device)
+    pixel_values = inputs.pixel_values.to(model.dtype) if hasattr(model, "dtype") else inputs.pixel_values.to(torch.float16)
+
+    # InternViT structures often have model.encoder.layers or model.vision_model.encoder.layers
+    if hasattr(model, "vision_model") and hasattr(model.vision_model.encoder, "layers"):
+        resblocks = model.vision_model.encoder.layers
+    elif hasattr(model, "encoder") and hasattr(model.encoder, "layers"):
+        resblocks = model.encoder.layers
+    else:
+        raise ValueError("Selected InternViT backbone does not expose encoder.layers or vision_model.encoder.layers.")
+
+    if layer_idx < 0 or layer_idx >= len(resblocks):
+        raise ValueError(f"Invalid intermediate layer index {layer_idx}. Valid range: [0, {len(resblocks)-1}]")
+
+    layer_output = {}
+
+    def hook_fn(module, _input, output):
+        # InternViT layers typically return a tuple (hidden_states, ...)
+        if isinstance(output, tuple):
+            layer_output["hidden"] = output[0]
+        else:
+            layer_output["hidden"] = output
+
+    hook = resblocks[layer_idx].register_forward_hook(hook_fn)
+    try:
+        with torch.no_grad():
+            # Pass only pixel_values for pure InternViT models
+            _ = model(pixel_values)
+    finally:
+        hook.remove()
+
+    if "hidden" not in layer_output:
+        raise RuntimeError("Forward hook did not capture intermediate output.")
+
+    hidden = layer_output["hidden"] # shape: [batch, seq_len, dim]
+    
+    if pool_type == "cls":
+        pooled = hidden[:, 0, :]
+    elif pool_type == "mean":
+        pooled = hidden[:, 1:, :].mean(dim=1) if hidden.shape[1] > 1 else hidden.mean(dim=1)
+    else:
+        raise ValueError(f"Unknown pool_type: {pool_type}")
+
+    feature = pooled.detach().cpu().numpy()  # shape: (1, D)
+    return feature
+
+
 def extract_dinov2(image:str, processor, model, device):
     inputs = processor(images=image, return_tensors="pt").to(device)
     with torch.no_grad():
@@ -167,6 +227,32 @@ def extract_image_features(
                 feature = extract_open_clip(image, processor, model, augmentation, device)
         elif model_type == 'dinov2':
             feature = extract_dinov2(image, processor, model, device)
+        elif model_type == 'internvit':
+            if feature_source == "intermediate":
+                feature = extract_internvit_intermediate(
+                    image,
+                    processor,
+                    model,
+                    augmentation,
+                    device,
+                    layer_idx=intermediate_layer,
+                    pool_type=intermediate_pool,
+                )
+            else:
+                # InternViT usually returns (last_hidden_state, pooled_output, ...)
+                # and we'd want the CLS from last layer or the pooled output.
+                # Standardizing to mean pooling of tokens for final layer or using outputs.last_hidden_state
+                inputs = processor(images=image, return_tensors="pt").to(device)
+                pixel_values = inputs.pixel_values.to(model.dtype) if hasattr(model, "dtype") else inputs.pixel_values.to(torch.float16)
+                with torch.no_grad():
+                    outputs = model(pixel_values)
+                if hasattr(outputs, "last_hidden_state"):
+                    feature = outputs.last_hidden_state[:, 0].detach().cpu().numpy()
+                elif isinstance(outputs, tuple):
+                    feature = outputs[0][:, 0].detach().cpu().numpy()
+                else:
+                    # Fallback for InternVLChat vision_model
+                    feature = outputs[:, 0].detach().cpu().numpy()
         all_features.append(feature)
     
     all_features = np.concatenate(all_features, axis=0)
@@ -204,9 +290,9 @@ def preprocess(image:Image.Image, augmentation=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", default="cuda:0", type=str, help="training device")
-    parser.add_argument("--model_type", type=str, choices=["clip", "open_clip", "dinov2"], default="open_clip")
-    parser.add_argument("--backbone", type=str, choices=["ViT-B-16", "ViT-B-32", "ViT-L-14", "ViT-H-14", "ViT-g-14", "ViT-bigG-14", "RN50", "RN101"], default="RN50")
-    parser.add_argument("--pretrained", type=str, choices=["laion2b_s32b_b79k", "laion2b_s32b_b82k", "laion2b_s34b_b79k", "laion2b_s34b_b88k", "laion2b_s39b_b160k", "openai"], default="openai")
+    parser.add_argument("--model_type", type=str, choices=["clip", "open_clip", "dinov2", "internvit"], default="open_clip")
+    parser.add_argument("--backbone", type=str, default="RN50")
+    parser.add_argument("--pretrained", type=str, default="openai")
     parser.add_argument("--repeat_times", type=int, default=1)
     parser.add_argument("--image_set_dir", type=str, default="./data/things_eeg/image_set")
     parser.add_argument("--output_dir", type=str, default="./data/things_eeg/image_feature/RN50")
@@ -215,6 +301,7 @@ if __name__ == "__main__":
     parser.add_argument("--feature_source", type=str, choices=["final", "intermediate"], default="final")
     parser.add_argument("--intermediate_layer", type=int, default=11, help="0-indexed block index for OpenCLIP ViT intermediate extraction")
     parser.add_argument("--intermediate_pool", type=str, choices=["cls", "mean"], default="cls", help="Pooling over intermediate tokens")
+    parser.add_argument("--quantization", type=str, choices=["none", "8bit", "4bit"], default="none", help="Quantization for InternViT models")
     args = parser.parse_args()
     
     print('Input arguments:')
@@ -237,10 +324,27 @@ if __name__ == "__main__":
         # small base large giant
         processor = AutoImageProcessor.from_pretrained("facebook/dinov2-giant")
         model = AutoModel.from_pretrained("facebook/dinov2-giant").to(device)
+    elif args.model_type == "internvit":
+        # Use args.backbone as the model ID, e.g. OpenGVLab/InternViT-6B-448px-V1-5
+        # Use quantization to fit 6B model on smaller GPUs (e.g. 10GB RTX 3080)
+        load_kwargs = {
+            "trust_remote_code": True,
+            "torch_dtype": torch.float16,
+        }
+        if args.quantization == "8bit":
+            load_kwargs.update({"load_in_8bit": True, "device_map": "auto"})
+        elif args.quantization == "4bit":
+            load_kwargs.update({"load_in_4bit": True, "device_map": "auto"})
+        
+        model = AutoModel.from_pretrained(args.backbone, **load_kwargs)
+        if args.quantization == "none":
+            model = model.to(device)
+            
+        processor = AutoImageProcessor.from_pretrained(args.backbone, trust_remote_code=True)
     model.eval()
 
-    if args.feature_source == "intermediate" and args.model_type != "open_clip":
-        raise ValueError("--feature_source intermediate is currently only supported for --model_type open_clip")
+    if args.feature_source == "intermediate" and args.model_type not in ["open_clip", "internvit"]:
+        raise ValueError("--feature_source intermediate is currently only supported for --model_type open_clip and internvit")
     
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)

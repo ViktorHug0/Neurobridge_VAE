@@ -3,7 +3,7 @@ set -e
 trap 'echo "Script Error"' ERR
 
 IMAGE_FEATURE_BASE_DIR="./data/things_eeg/image_feature"
-IMAGE_ENCODER_TYPE="RN50"
+IMAGE_ENCODER_TYPE="InternViT-6B_layer28_mean_8bit"
 IMAGE_FEATURE_DIR="${IMAGE_FEATURE_BASE_DIR}/${IMAGE_ENCODER_TYPE}"
 TEXT_FEATURE_DIR=""
 EEG_DATA_DIR="./data/things_eeg/preprocessed_eeg"
@@ -13,10 +13,10 @@ DEVICE="cuda:0"
 EEG_ENCODER_TYPE="EEGProject"
 BATCH_SIZE=1024
 LEARNING_RATE=1e-4
-NUM_EPOCHS=50
+NUM_EPOCHS=30
 SELECTED_CHANNELS=('P7' 'P5' 'P3' 'P1' 'Pz' 'P2' 'P4' 'P6' 'P8' 'PO7' 'PO3' 'POz' 'PO4' 'PO8' 'O1' 'Oz' 'O2')
 PROJECTOR="linear"
-FEATURE_DIM=512
+FEATURE_DIM=1024
 OUTPUT_DIR="./results/things_eeg/intra-subjects"
 NUM_WORKERS="$(nproc)"
 
@@ -39,12 +39,7 @@ do
         --device "$DEVICE"  \
         --output_dir "$OUTPUT_DIR" \
         --selected_channels "${SELECTED_CHANNELS[@]}" \
-        --image_aug \
-        --aug_image_feature_dirs "./data/things_eeg/image_feature/RN50/GaussianBlur-GaussianNoise-LowResolution-Mosaic" \
-        --eeg_aug \
-        --eeg_aug_type "smooth" \
         --num_workers "$NUM_WORKERS" \
-        --image_test_aug \
         --img_l2norm \
         --projector "$PROJECTOR" \
         --feature_dim "$FEATURE_DIM" \
@@ -54,3 +49,9 @@ do
 done
 
 python compute_avg_results.py --result_dir "$OUTPUT_DIR";
+
+        # --image_aug \
+        # --aug_image_feature_dirs "./data/things_eeg/image_feature/RN50/GaussianBlur-GaussianNoise-LowResolution-Mosaic" \
+        # --eeg_aug \
+        # --eeg_aug_type "smooth" \
+        # --image_test_aug \

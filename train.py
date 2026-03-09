@@ -416,7 +416,7 @@ if __name__ == '__main__':
 
     # Determine eeg projector input dim (depends on iVAE mode)
     if args.ivae:
-        eeg_proj_input_dim = args.z_is_dim + args.z_i_dim + (5 if args.cl_cond_on_subject else 0)
+        eeg_proj_input_dim = args.z_i_dim + (5 if args.cl_cond_on_subject else 0)
     else:
         eeg_proj_input_dim = feature_dim
 
@@ -524,8 +524,8 @@ if __name__ == '__main__':
                     C_stop_iter=args.C_stop_iter,
                 )
 
-                # Contrastive latents: image-conditioned blocks (z_is, z_i), optional subject signature.
-                z_for_cl = torch.cat([ivae_out['z_is'], ivae_out['z_i']], dim=-1)
+                # Contrastive latents: image-only block (z_i), optional subject signature.
+                z_for_cl = ivae_out['z_i']
                 if args.cl_cond_on_subject:
                     z_for_cl = torch.cat([z_for_cl, u_batch], dim=-1)
 
@@ -790,7 +790,7 @@ if __name__ == '__main__':
                         C_stop_iter=args.C_stop_iter,
                     )
 
-                    z_for_cl = torch.cat([ivae_out['z_is'], ivae_out['z_i']], dim=-1)
+                    z_for_cl = ivae_out['z_i']
                     if args.cl_cond_on_subject:
                         z_for_cl = torch.cat([z_for_cl, u_batch], dim=-1)
 

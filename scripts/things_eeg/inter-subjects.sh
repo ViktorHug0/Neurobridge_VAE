@@ -5,20 +5,20 @@ trap 'echo "Script Error"' ERR
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 IMAGE_FEATURE_BASE_DIR="${IMAGE_FEATURE_BASE_DIR:-./data/things_eeg/image_feature}"
-IMAGE_ENCODER_TYPE="${IMAGE_ENCODER_TYPE:-RN50}"
+IMAGE_ENCODER_TYPE="${IMAGE_ENCODER_TYPE:-InternViT-6B_layer28_mean_8bit}"
 IMAGE_FEATURE_DIR="${IMAGE_FEATURE_BASE_DIR}/${IMAGE_ENCODER_TYPE}"
 TEXT_FEATURE_DIR="${TEXT_FEATURE_DIR:-}"
 # Use NICE-EEG preprocessed files directly (no copying/renaming required).
 EEG_DATA_DIR="${EEG_DATA_DIR:-/nasbrain/p20fores/NICE-EEG/Data/Things-EEG2/Preprocessed_data_250Hz}"
 DEVICE="${DEVICE:-cuda:0}"
-EEG_ENCODER_TYPE="${EEG_ENCODER_TYPE:-TSConv}"
+EEG_ENCODER_TYPE="${EEG_ENCODER_TYPE:-EEGProject}"
 BATCH_SIZE="${BATCH_SIZE:-1024}"
-LEARNING_RATE="${LEARNING_RATE:-1e-4}"
-NUM_EPOCHS="${NUM_EPOCHS:-20}"
-# SELECTED_CHANNELS=('P7' 'P5' 'P3' 'P1' 'Pz' 'P2' 'P4' 'P6' 'P8' 'PO7' 'PO3' 'POz' 'PO4' 'PO8' 'O1' 'Oz' 'O2')
-SELECTED_CHANNELS=() # "Oz" "O1" "O2" "POz" "PO3" "PO4" "PO7" "PO8" "Pz" "P1" "P2" "P3" "P4" "P5" "P6" "P7" "P8" "TP7" "TP8" "T7" "T8" "FT7" "FT8")
+LEARNING_RATE="${LEARNING_RATE:-5e-5}"
+NUM_EPOCHS="${NUM_EPOCHS:-30}"
+SELECTED_CHANNELS=('P7' 'P5' 'P3' 'P1' 'Pz' 'P2' 'P4' 'P6' 'P8' 'PO7' 'PO3' 'POz' 'PO4' 'PO8' 'O1' 'Oz' 'O2')
+# SELECTED_CHANNELS=() # "Oz" "O1" "O2" "POz" "PO3" "PO4" "PO7" "PO8" "Pz" "P1" "P2" "P3" "P4" "P5" "P6" "P7" "P8" "TP7" "TP8" "T7" "T8" "FT7" "FT8")
 PROJECTOR="${PROJECTOR:-linear}"
-FEATURE_DIM="${FEATURE_DIM:-512}"
+FEATURE_DIM="${FEATURE_DIM:-1024}"
 OUTPUT_DIR="${OUTPUT_DIR:-./results/things_eeg/inter-subjects}"
 NUM_WORKERS="${NUM_WORKERS:-4}" # "$(nproc)"
 SUBJECT_PROBE_HOLDOUT="${SUBJECT_PROBE_HOLDOUT:-true}"
@@ -27,17 +27,17 @@ WANDB_PROJECT="${WANDB_PROJECT:-Neurobridge_VAE}"
 WANDB_COLLECTION="${WANDB_COLLECTION:-runs}"
 
 # iVAE/CL defaults (can be overridden via env for sweeps).
-GAMMA_CL="${GAMMA_CL:-0.0}"
+GAMMA_CL="${GAMMA_CL:-0}"
 N_SUBJECTS="${N_SUBJECTS:-11}"
 Z_S_DIM="${Z_S_DIM:-16}"
 Z_IS_DIM="${Z_IS_DIM:-16}"
 Z_I_DIM="${Z_I_DIM:-16}"
 Z_N_DIM="${Z_N_DIM:-16}"
-BETA_S="${BETA_S:-1}"
-BETA_IS="${BETA_IS:-1}"
-BETA_I="${BETA_I:-1}"
-BETA_N="${BETA_N:-1}"
-LAMBDA_RECON="${LAMBDA_RECON:-1}"
+BETA_S="${BETA_S:-1.0}"
+BETA_IS="${BETA_IS:-1.0}"
+BETA_I="${BETA_I:-1.0}"
+BETA_N="${BETA_N:-1.0}"
+LAMBDA_RECON="${LAMBDA_RECON:-1.0}"
 LAMBDA_SUBJ_CLS="${LAMBDA_SUBJ_CLS:-0.0}"
 LAMBDA_SUBJ_ADV="${LAMBDA_SUBJ_ADV:-0.0}"
 GRL_LAMBDA="${GRL_LAMBDA:-0.0}"
@@ -45,7 +45,7 @@ C_MAX="${C_MAX:-0}"
 C_STOP_ITER="${C_STOP_ITER:-10000}"
 IVAE_HIDDEN_DIM="${IVAE_HIDDEN_DIM:-512}"
 IVAE_N_LAYERS="${IVAE_N_LAYERS:-1}"
-IMAGE_PRIOR_HIDDEN_DIM="${IMAGE_PRIOR_HIDDEN_DIM:-256}"
+IMAGE_PRIOR_HIDDEN_DIM="${IMAGE_PRIOR_HIDDEN_DIM:-16}"
 CL_COND_ON_SUBJECT="${CL_COND_ON_SUBJECT:-true}"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
@@ -105,8 +105,6 @@ do
         --gamma_cl "$GAMMA_CL" \
         --n_subjects "$N_SUBJECTS" \
         --multi_positive_loss \
-        $CL_COND_FLAG \
-        $SUBJECT_PROBE_HOLDOUT_FLAG \
         --ivae \
         --z_s_dim "$Z_S_DIM" \
         --z_is_dim "$Z_IS_DIM" \
@@ -117,26 +115,22 @@ do
         --beta_i "$BETA_I" \
         --beta_n "$BETA_N" \
         --lambda_recon "$LAMBDA_RECON" \
+        --gamma_cl "$GAMMA_CL" \
         --lambda_subj_cls "$LAMBDA_SUBJ_CLS" \
         --lambda_subj_adv "$LAMBDA_SUBJ_ADV" \
         --grl_lambda "$GRL_LAMBDA" \
-        --C_max "$C_MAX" \
-        --C_stop_iter "$C_STOP_ITER" \
         --ivae_hidden_dim "$IVAE_HIDDEN_DIM" \
         --ivae_n_layers "$IVAE_N_LAYERS" \
         --image_prior_hidden_dim "$IMAGE_PRIOR_HIDDEN_DIM" \
+        $CL_COND_FLAG \
+        $SUBJECT_PROBE_HOLDOUT_FLAG \
         $WANDB_FLAG ;
 done
 
 "${PYTHON_BIN}" compute_avg_results.py --result_dir "$RUN_DIR";
-        # --image_aug    
-        # --aug_image_feature_dirs "./data/things_eeg/image_feature/RN50/GaussianBlur-GaussianNoise-LowResolution-Mosaic"
-        # --eeg_aug
-        # --eeg_aug_type "smooth"
-        # --image_test_aug
 
         # ── iVAE flags (uncomment to enable) ──
-        # --ivae
+        
         # --z_s_dim 16
         # --z_is_dim 16
         # --z_i_dim 256
